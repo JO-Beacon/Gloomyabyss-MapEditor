@@ -39,6 +39,12 @@ class Win32Window {
   // Show the current window. Returns true if the window was successfully shown.
   bool Show();
 
+  // Apply caption colors and disable any system backdrop (Mica / Acrylic),
+  // keeping the frame opaque and matching the app background.
+  // Once called, UpdateTheme() stops overriding them.
+  void SetCaptionColors(COLORREF caption, COLORREF text, COLORREF border,
+                        bool dark);
+
   // Release OS resources associated with window.
   void Destroy();
 
@@ -91,6 +97,10 @@ class Win32Window {
   static void UpdateTheme(HWND const window);
 
   bool quit_on_close_ = false;
+
+  // Whether the app has taken over the caption colors (see SetCaptionColors).
+  // Static because UpdateTheme() is static.
+  static inline bool custom_caption_ = false;
 
   // window handle for top level window.
   HWND window_handle_ = nullptr;

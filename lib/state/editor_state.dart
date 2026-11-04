@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import '../io/gmap.dart';
 import '../models/obj.dart';
 import '../models/prop.dart';
+import '../models/solid.dart';
 import '../models/terrain.dart';
 import '../models/world.dart';
 
@@ -61,6 +62,25 @@ class EditorState extends ChangeNotifier {
   int selectedPlane = -1;
   bool pickPlane = false;
   int? _pickStart;
+
+  bool startPick = false;
+  bool solidPick = false;
+  int selectedSolid = -1;
+  final List<(int, int)> _solidDraft = [];
+
+  List<(int, int)> get solidDraft => List<(int, int)>.unmodifiable(_solidDraft);
+
+  int? get worldStartCol {
+    final s = world?.raw['start'];
+    if (s is Map) return (s['col'] as num?)?.toInt();
+    return null;
+  }
+
+  int? get worldStartRow {
+    final s = world?.raw['start'];
+    if (s is Map) return (s['row'] as num?)?.toInt();
+    return null;
+  }
 
   _Pending? _renamePending;
   int _renameIndex = -1;
@@ -385,6 +405,9 @@ class EditorState extends ChangeNotifier {
     selectedSegment = index;
     pickPlane = false;
     _pickStart = null;
+    startPick = false;
+    solidPick = false;
+    selectedSolid = -1;
     notifyListeners();
   }
 
@@ -719,6 +742,241 @@ class EditorState extends ChangeNotifier {
       undo: () => apply(before),
       redo: () => apply(after),
     ));
+    notifyListeners();
+  }
+
+  List<SolidShape> get solids {
+    final s = segment;
+    if (s == null) return const <SolidShape>[];
+    return parseSolids(s.instructions);
+  }
+
+  void selectSolid(int index) {
+    selectedSolid = index;
+    notifyListeners();
+  }
+
+  void toggleSolidPick() {
+    if (solidPick) {
+      _solidDraft.clear();
+      solidPick = false;
+    } else {
+      _solidDraft.clear();
+      solidPick = true;
+      startPick = false;
+      pickPlane = false;
+    }
+    notifyListeners();
+  }
+
+  void cancelSolid() {
+    _solidDraft.clear();
+    solidPick = false;
+    notifyListeners();
+  }
+
+  /// 点一个顶点；点回第一个点时闭合。
+  void pickSolidCell(int col, int row) {
+    if (!solidPick) return;
+
+    if (_solidDraft.length >= 3 && _solidDraft.first == (col, row)) {
+      finishSolid();
+      return;
+    }
+    if (_solidDraft.isNotEmpty && _solidDraft.last == (col, row)) return;
+
+    _solidDraft.add((col, row));
+    notice = '已点 ${_solidDraft.length} 个点';
+    notifyListeners();
+  }
+
+  /// 引擎用 SAT，只支持凸多边形；凹的在这里拆成三角形。
+  bool _isConvex(List<(int, int)> pts) {
+    int? sign;
+    for (int i = 0; i < pts.length; i++) {
+      final (int ax, int ay) = pts[i];
+      final (int bx, int by) = pts[(i + 1) % pts.length];
+      final (int cx, int cy) = pts[(i + 2) % pts.length];
+      final int cross = (bx - ax) * (cy - by) - (by - ay) * (cx - bx);
+      if (cross == 0) continue;
+      final int s = cross > 0 ? 1 : -1;
+      if (sign == null) {
+        sign = s;
+      } else if (sign != s) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  static bool _pointInTriangle(
+    (int, int) p,
+    (int, int) a,
+    (int, int) b,
+    (int, int) c,
+  ) {
+    int cross((int, int) o, (int, int) u, (int, int) v) =>
+        (u.$1 - o.$1) * (v.$2 - o.$2) - (u.$2 - o.$2) * (v.$1 - o.$1);
+
+    final int d1 = cross(a, b, p);
+    final int d2 = cross(b, c, p);
+    final int d3 = cross(c, a, p);
+    final bool hasNeg = d1 < 0 || d2 < 0 || d3 < 0;
+    final bool hasPos = d1 > 0 || d2 > 0 || d3 > 0;
+    return !(hasNeg && hasPos);
+  }
+
+  /// 耳切法。失败（自交、退化）返回 null。
+  List<List<(int, int)>>? _triangulate(List<(int, int)> input) {
+    final pts = <(int, int)>[];
+    for (int i = 0; i < input.length; i++) {
+      final (int ax, int ay) = input[i];
+      final (int bx, int by) = input[(i + 1) % input.length];
+      final (int cx, int cy) = input[(i + 2) % input.length];
+      final int cross = (bx - ax) * (cy - by) - (by - ay) * (cx - bx);
+      if (cross != 0) pts.add(input[i]);
+    }
+    if (pts.length < 3) return null;
+
+    double area2 = 0;
+    for (int i = 0; i < pts.length; i++) {
+      final (int x1, int y1) = pts[i];
+      final (int x2, int y2) = pts[(i + 1) % pts.length];
+      area2 += (x1 * y2 - x2 * y1).toDouble();
+    }
+    if (area2 == 0) return null;
+    final bool ccw = area2 > 0;
+
+    final out = <List<(int, int)>>[];
+    final work = List<(int, int)>.from(pts);
+    int guard = 0;
+
+    while (work.length > 3 && guard++ < 4096) {
+      bool found = false;
+      for (int i = 0; i < work.length; i++) {
+        final (int ax, int ay) = work[(i + work.length - 1) % work.length];
+        final (int bx, int by) = work[i];
+        final (int cx, int cy) = work[(i + 1) % work.length];
+        final int cross = (bx - ax) * (cy - by) - (by - ay) * (cx - bx);
+        if (ccw ? cross <= 0 : cross >= 0) continue;
+
+        bool blocked = false;
+        for (int j = 0; j < work.length; j++) {
+          if (j == i ||
+              j == (i + work.length - 1) % work.length ||
+              j == (i + 1) % work.length) {
+            continue;
+          }
+          if (_pointInTriangle(work[j], work[(i + work.length - 1) % work.length],
+              work[i], work[(i + 1) % work.length])) {
+            blocked = true;
+            break;
+          }
+        }
+        if (blocked) continue;
+
+        out.add([(ax, ay), (bx, by), (cx, cy)]);
+        work.removeAt(i);
+        found = true;
+        break;
+      }
+      if (!found) return null;
+    }
+
+    if (work.length == 3) out.add([work[0], work[1], work[2]]);
+    return out.isEmpty ? null : out;
+  }
+
+  void finishSolid() {
+    final s = segment;
+    if (s == null || _solidDraft.length < 3) return;
+
+    final pieces = _isConvex(_solidDraft)
+        ? <List<(int, int)>>[List<(int, int)>.from(_solidDraft)]
+        : _triangulate(_solidDraft);
+    if (pieces == null) {
+      setError('多边形无法拆分（可能自交），请重画');
+      return;
+    }
+
+    final lines = pieces
+        .map((poly) => '; solid=${poly.map((p) => '${p.$1},${p.$2}').join(', ')}')
+        .toList(growable: false);
+    final index = s.instructions.length;
+    s.instructions.addAll(lines);
+
+    _push(_Action(
+      label: '加碰撞',
+      undo: () {
+        for (int i = 0; i < lines.length; i++) {
+          if (index < s.instructions.length) s.instructions.removeAt(index);
+        }
+      },
+      redo: () => s.instructions.addAll(lines),
+    ));
+
+    final bool split = lines.length > 1;
+    _solidDraft.clear();
+    solidPick = false;
+    notice = split ? '凹多边形已拆成 ${lines.length} 个三角形' : '已添加碰撞';
+    notifyListeners();
+  }
+
+  void removeSolid(int instructionIndex) {
+    final s = segment;
+    if (s == null || instructionIndex < 0 || instructionIndex >= s.instructions.length) {
+      return;
+    }
+    final line = s.instructions.removeAt(instructionIndex);
+    _push(_Action(
+      label: '删碰撞',
+      undo: () => s.instructions.insert(instructionIndex, line),
+      redo: () {
+        final i = s.instructions.indexOf(line);
+        if (i >= 0) s.instructions.removeAt(i);
+      },
+    ));
+    notifyListeners();
+  }
+
+  void toggleStartPick() {
+    startPick = !startPick;
+    if (startPick) {
+      solidPick = false;
+      pickPlane = false;
+    }
+    notifyListeners();
+  }
+
+  /// 画布点格子 → 换算成世界坐标写入 world.json 的 start。
+  void setStartFromCell(int col, int row) {
+    final w = world;
+    final s = segment;
+    if (w == null || s == null || !startPick) return;
+
+    final before = w.raw['start'] == null
+        ? null
+        : Map<String, dynamic>.from(w.raw['start'] as Map);
+    final wc = s.spec.originCol + col;
+    final wr = s.spec.originRow + row;
+    w.raw['start'] = <String, dynamic>{'col': wc, 'row': wr};
+
+    _push(_Action(
+      label: '改世界起点',
+      undo: () {
+        if (before == null) {
+          w.raw.remove('start');
+        } else {
+          w.raw['start'] = Map<String, dynamic>.from(before);
+        }
+        notifyListeners();
+      },
+      redo: () {
+        w.raw['start'] = <String, dynamic>{'col': wc, 'row': wr};
+        notifyListeners();
+      },
+    ));
+    startPick = false;
     notifyListeners();
   }
 

@@ -3,7 +3,6 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:jo_draftui/jo_draftui.dart';
-import 'package:window_manager/window_manager.dart';
 
 import '../config.dart';
 import '../models/world.dart';
@@ -35,21 +34,17 @@ class _EditorPageState extends State<EditorPage> {
   int _newWorldHeight = 24;
   int _panelTab = 0;
 
-  Window? _window;
-  ListenerId? _windowListener;
-  bool _allowClose = false;
+  static const MethodChannel _windowChannel = MethodChannel('jodraft/window');
 
   @override
   void initState() {
     super.initState();
-    _window = WindowManager.instance.getCurrent();
-    _windowListener = _window?.addListener(_onWindowEvent);
+    _windowChannel.setMethodCallHandler(_onWindowCall);
   }
 
   @override
   void dispose() {
-    final id = _windowListener;
-    if (id != null) _window?.removeListener(id);
+    _windowChannel.setMethodCallHandler(null);
     super.dispose();
   }
 
@@ -62,16 +57,20 @@ class _EditorPageState extends State<EditorPage> {
     setState(() => _saveGuardOpen = true);
   }
 
-  void _onWindowEvent(WindowEvent event) {
-    if (event is! WindowCloseRequestedEvent) return;
-    if (_allowClose || !state.dirty) return;
-    event.request.cancel();
-    setState(() => _closePromptOpen = true);
+  Future<dynamic> _onWindowCall(MethodCall call) async {
+    if (call.method == 'closeRequested') {
+      if (!state.dirty) {
+        _closeWindow();
+      } else {
+        setState(() => _closePromptOpen = true);
+      }
+      return null;
+    }
+    return null;
   }
 
   void _closeWindow() {
-    _allowClose = true;
-    _window?.close();
+    _windowChannel.invokeMethod<void>('destroy');
   }
 
   @override
@@ -161,6 +160,16 @@ class _EditorPageState extends State<EditorPage> {
     if (!keyboard.isControlPressed) return KeyEventResult.ignored;
 
     final key = event.logicalKey;
+
+    // Ctrl+S 始终归编辑器，输入框里也能保存
+    if (key == LogicalKeyboardKey.keyS) {
+      if (state.world != null) state.save();
+      return KeyEventResult.handled;
+    }
+
+    // 撤销/重做在输入框聚焦时让给输入框自己
+    if (JoTextField.isEditing) return KeyEventResult.ignored;
+
     if (key == LogicalKeyboardKey.keyZ) {
       if (keyboard.isShiftPressed) {
         state.redo();
@@ -171,10 +180,6 @@ class _EditorPageState extends State<EditorPage> {
     }
     if (key == LogicalKeyboardKey.keyY) {
       state.redo();
-      return KeyEventResult.handled;
-    }
-    if (key == LogicalKeyboardKey.keyS) {
-      if (state.world != null) state.save();
       return KeyEventResult.handled;
     }
     return KeyEventResult.ignored;
@@ -441,6 +446,14 @@ class _EditorPageState extends State<EditorPage> {
       placedObjects: state.placedObjects,
       objectMode: _panelTab == 2,
       onObjectCell: state.toggleObjectAt,
+      worldStartCol: state.worldStartCol,
+      worldStartRow: state.worldStartRow,
+      startPickMode: state.startPick,
+      onStartCell: state.setStartFromCell,
+      solids: state.solids,
+      solidMode: state.solidPick,
+      onSolidCell: state.pickSolidCell,
+      solidDraft: state.solidDraft,
       pickMode: state.pickPlane,
       onPickCell: state.pickCell,
     );
@@ -463,6 +476,8 @@ class _EditorPageState extends State<EditorPage> {
                   (label: '对象', value: 2),
                   (label: '传送', value: 3),
                   (label: '段', value: 4),
+                  (label: '碰撞', value: 5),
+                  (label: '世界', value: 6),
                 ],
                 value: _panelTab,
                 onChanged: (v) {
@@ -480,7 +495,9 @@ class _EditorPageState extends State<EditorPage> {
                 1 => _propPanel(p),
                 2 => _objectPanel(p),
                 3 => _portalPanel(p),
-                _ => _segmentPanel(p),
+                4 => _segmentPanel(p),
+                5 => _solidPanel(p),
+                _ => _worldPanel(p),
               },
             ),
           ],
@@ -547,6 +564,135 @@ class _EditorPageState extends State<EditorPage> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _solidPanel(JoPalette p) {
+    if (state.world == null) {
+      return Center(
+        child: Text(
+          '先打开一个世界',
+          style: JoTheme.meta(context).copyWith(color: p.secondary),
+        ),
+      );
+    }
+    final solids = state.solids;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(JoSpace.s3),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  JoButton(
+                    text: state.solidPick ? '点顶点中…' : '新建碰撞',
+                    bordered: true,
+                    color: state.solidPick ? p.accent : null,
+                    onTap: state.toggleSolidPick,
+                  ),
+                  const SizedBox(width: JoSpace.s2),
+                  JoButton(
+                    text: '完成',
+                    bordered: true,
+                    onTap: state.solidPick && state.solidDraft.length >= 3
+                        ? state.finishSolid
+                        : null,
+                  ),
+                  const SizedBox(width: JoSpace.s2),
+                  JoButton(
+                    text: '取消',
+                    onTap: state.solidPick ? state.cancelSolid : null,
+                  ),
+                ],
+              ),
+              if (state.solidPick) ...[
+                const SizedBox(height: JoSpace.s1),
+                Text(
+                  '已点 ${state.solidDraft.length} 个点；点回第一个点或按“完成”闭合。凹多边形会自动拆成三角形。',
+                  style: JoTheme.meta(context).copyWith(color: p.secondary),
+                ),
+              ],
+            ],
+          ),
+        ),
+        Container(height: 1, color: p.border),
+        Expanded(
+          child: solids.isEmpty
+              ? Center(
+                  child: Text(
+                    '没有碰撞',
+                    style: JoTheme.meta(context).copyWith(color: p.secondary),
+                  ),
+                )
+              : ListView.builder(
+                  itemCount: solids.length,
+                  itemBuilder: (context, index) {
+                    return JoListRow(
+                      title: '碰撞 ${index + 1}',
+                      subtitle: solids[index].label,
+                      selected: index == state.selectedSolid,
+                      onTap: () => state.selectSolid(index),
+                    );
+                  },
+                ),
+        ),
+      ],
+    );
+  }
+
+  Widget _worldPanel(JoPalette p) {
+    final w = state.world;
+    if (w == null) {
+      return Center(
+        child: Text(
+          '先打开一个世界',
+          style: JoTheme.meta(context).copyWith(color: p.secondary),
+        ),
+      );
+    }
+    final col = state.worldStartCol;
+    final row = state.worldStartRow;
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(JoSpace.s3),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _label(p, '名称'),
+          Text(
+            w.name,
+            style: JoTheme.ui(context).copyWith(fontSize: 13, color: p.text),
+          ),
+          const SizedBox(height: JoSpace.s3),
+          _label(p, '起点（世界坐标）'),
+          Text(
+            col == null || row == null ? '未设置' : 'col $col, row $row',
+            style: JoTheme.meta(context).copyWith(color: p.text),
+          ),
+          const SizedBox(height: JoSpace.s2),
+          JoButton(
+            text: state.startPick ? '在画布上点…' : '在画布上点',
+            bordered: true,
+            color: state.startPick ? p.accent : null,
+            onTap: state.toggleStartPick,
+          ),
+          const SizedBox(height: JoSpace.s2),
+          Text(
+            '点一下画布上的格子，换算成世界坐标写入 world.json。',
+            style: JoTheme.meta(context).copyWith(color: p.secondary),
+          ),
+          const SizedBox(height: JoSpace.s4),
+          _label(p, '段'),
+          Text(
+            '${w.segments.length} 个',
+            style: JoTheme.meta(context).copyWith(color: p.text),
+          ),
+        ],
+      ),
     );
   }
 

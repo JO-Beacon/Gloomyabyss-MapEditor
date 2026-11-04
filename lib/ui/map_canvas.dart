@@ -6,6 +6,7 @@ import 'package:jo_draftui/jo_draftui.dart';
 
 import '../models/obj.dart';
 import '../models/prop.dart';
+import '../models/solid.dart';
 import '../models/terrain.dart';
 import '../models/world.dart';
 
@@ -28,6 +29,14 @@ class MapCanvas extends StatefulWidget {
     this.placedObjects = const <PlacedObject>[],
     this.objectMode = false,
     this.onObjectCell,
+    this.worldStartCol,
+    this.worldStartRow,
+    this.startPickMode = false,
+    this.onStartCell,
+    this.solids = const <SolidShape>[],
+    this.solidMode = false,
+    this.onSolidCell,
+    this.solidDraft = const <(int, int)>[],
   });
 
   final Segment segment;
@@ -56,6 +65,16 @@ class MapCanvas extends StatefulWidget {
   final bool objectMode;
   final void Function(int col, int row)? onObjectCell;
 
+  final int? worldStartCol;
+  final int? worldStartRow;
+  final bool startPickMode;
+  final void Function(int col, int row)? onStartCell;
+
+  final List<SolidShape> solids;
+  final bool solidMode;
+  final void Function(int col, int row)? onSolidCell;
+  final List<(int, int)> solidDraft;
+
   @override
   State<MapCanvas> createState() => _MapCanvasState();
 }
@@ -72,6 +91,7 @@ class _MapCanvasState extends State<MapCanvas> {
   bool _stroking = false;
   bool _panning = false;
   Offset _lastPointer = Offset.zero;
+  (int, int)? _hoverCell;
 
   @override
   void didUpdateWidget(covariant MapCanvas oldWidget) {
@@ -108,6 +128,15 @@ class _MapCanvasState extends State<MapCanvas> {
     return (
       ((local.dx - offset.dx) / scale).floor(),
       ((local.dy - offset.dy) / scale).floor(),
+    );
+  }
+
+  (int, int) _cornerAt(Offset local) {
+    final double sc = _effectiveScale;
+    final Offset off = _offset;
+    return (
+      ((local.dx - off.dx) / sc).round(),
+      ((local.dy - off.dy) / sc).round(),
     );
   }
 
@@ -183,6 +212,16 @@ class _MapCanvasState extends State<MapCanvas> {
                   widget.onObjectCell?.call(col, row);
                   return;
                 }
+                if (widget.startPickMode) {
+                  final (col, row) = _cellAt(event.localPosition);
+                  widget.onStartCell?.call(col, row);
+                  return;
+                }
+                if (widget.solidMode) {
+                  final (int cx, int cy) = _cornerAt(event.localPosition);
+                  widget.onSolidCell?.call(cx, cy);
+                  return;
+                }
                 _stroking = true;
                 widget.onStrokeStart();
                 _paintAt(event.localPosition);
@@ -213,6 +252,18 @@ class _MapCanvasState extends State<MapCanvas> {
             },
             child: MouseRegion(
               cursor: SystemMouseCursors.precise,
+              onHover: (event) {
+                if (!widget.solidMode) return;
+                final (int c, int r) = _cornerAt(event.localPosition);
+                if (_hoverCell != (c, r)) {
+                  setState(() => _hoverCell = (c, r));
+                }
+              },
+              onExit: (_) {
+                if (_hoverCell != null) {
+                  setState(() => _hoverCell = null);
+                }
+              },
               child: CustomPaint(
                 size: Size.infinite,
                 painter: _MapPainter(
@@ -228,6 +279,12 @@ class _MapCanvasState extends State<MapCanvas> {
                   placedProps: widget.placedProps,
                   propTypes: widget.propTypes,
                   placedObjects: widget.placedObjects,
+                  worldStartCol: widget.worldStartCol,
+                  worldStartRow: widget.worldStartRow,
+                  solids: widget.solids,
+                  solidDraft: widget.solidDraft,
+                  solidHoverCell: _hoverCell,
+                  accentColor: p.accent,
                 ),
               ),
             ),
@@ -289,6 +346,12 @@ class _MapPainter extends CustomPainter {
     required this.placedProps,
     required this.propTypes,
     required this.placedObjects,
+    required this.worldStartCol,
+    required this.worldStartRow,
+    required this.solids,
+    required this.solidDraft,
+    required this.solidHoverCell,
+    required this.accentColor,
   });
 
   final Segment segment;
@@ -303,6 +366,12 @@ class _MapPainter extends CustomPainter {
   final List<PlacedProp> placedProps;
   final List<PropType> propTypes;
   final List<PlacedObject> placedObjects;
+  final int? worldStartCol;
+  final int? worldStartRow;
+  final List<SolidShape> solids;
+  final List<(int, int)> solidDraft;
+  final (int, int)? solidHoverCell;
+  final Color accentColor;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -416,6 +485,95 @@ class _MapPainter extends CustomPainter {
           textDirection: TextDirection.ltr,
         )..layout();
         tp.paint(canvas, center - Offset(tp.width / 2, tp.height / 2));
+      }
+    }
+
+    if (solidDraft.isNotEmpty) {
+      final Paint draftPaint = Paint()
+        ..color = accentColor
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2;
+
+      final Path draftPath = Path();
+      for (int i = 0; i < solidDraft.length; i++) {
+        final Offset o = Offset(
+          solidDraft[i].$1 * scale,
+          solidDraft[i].$2 * scale,
+        );
+        if (i == 0) {
+          draftPath.moveTo(o.dx, o.dy);
+        } else {
+          draftPath.lineTo(o.dx, o.dy);
+        }
+      }
+      canvas.drawPath(draftPath, draftPaint);
+
+      for (final (int px, int py) in solidDraft) {
+        final Offset o = Offset(px * scale, py * scale);
+        canvas.drawRect(
+          Rect.fromCenter(center: o, width: 6, height: 6),
+          Paint()..color = accentColor,
+        );
+      }
+
+      if (solidHoverCell != null) {
+        final (int hc, int hr) = solidHoverCell!;
+        final Offset hover = Offset(hc * scale, hr * scale);
+        final Offset last = Offset(
+          solidDraft.last.$1 * scale,
+          solidDraft.last.$2 * scale,
+        );
+        canvas.drawLine(last, hover, draftPaint);
+        if (solidDraft.length >= 3) {
+          final Offset first = Offset(
+            solidDraft.first.$1 * scale,
+            solidDraft.first.$2 * scale,
+          );
+          canvas.drawLine(
+            hover,
+            first,
+            Paint()
+              ..color = accentColor.withValues(alpha: 0.4)
+              ..strokeWidth = 1,
+          );
+        }
+      }
+    }
+
+    for (final SolidShape solid in solids) {
+      final Paint line = Paint()
+        ..color = const Color(0xFFD96C6C)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2;
+      final Path path = Path();
+      for (int i = 0; i < solid.points.length; i++) {
+        final (int px, int py) = solid.points[i];
+        final Offset o = Offset(px * scale, py * scale);
+        if (i == 0) {
+          path.moveTo(o.dx, o.dy);
+        } else {
+          path.lineTo(o.dx, o.dy);
+        }
+      }
+      path.close();
+      canvas.drawPath(path, line);
+    }
+
+    final int? sc = worldStartCol;
+    final int? sr = worldStartRow;
+    if (sc != null && sr != null) {
+      final int lc = sc - segment.spec.originCol;
+      final int lr = sr - segment.spec.originRow;
+      if (lc >= 0 && lc < segment.width && lr >= 0 && lr < segment.height) {
+        final Offset c = Offset((lc + 0.5) * scale, (lr + 0.5) * scale);
+        final Paint ring = Paint()
+          ..color = accent
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2;
+        canvas.drawCircle(c, (scale * 0.32).clamp(4.0, 12.0), ring);
+        final double r = (scale * 0.12).clamp(2.0, 5.0);
+        canvas.drawLine(c - Offset(r, 0), c + Offset(r, 0), ring);
+        canvas.drawLine(c - Offset(0, r), c + Offset(0, r), ring);
       }
     }
 

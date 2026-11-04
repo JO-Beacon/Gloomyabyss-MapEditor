@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gloomyabyss_map_editor/models/obj.dart';
 import 'package:gloomyabyss_map_editor/models/prop.dart';
+import 'package:gloomyabyss_map_editor/models/solid.dart';
 import 'package:gloomyabyss_map_editor/models/world.dart';
 import 'package:gloomyabyss_map_editor/state/editor_state.dart';
 
@@ -325,5 +326,53 @@ void main() {
 
     state.undo();
     expect(segment.instructions, ['; spawn=Obj_Froggit,1,1']);
+  });
+
+  test('凹多边形闭合时自动拆成三角形', () {
+    final state = EditorState();
+    final world = makeWorld();
+    state.world = world;
+    state.selectedSegment = 0;
+
+    // L 形，6 个顶点，凹
+    const pts = <(int, int)>[
+      (0, 0),
+      (4, 0),
+      (4, 2),
+      (2, 2),
+      (2, 4),
+      (0, 4),
+    ];
+
+    state.toggleSolidPick();
+    for (final p in pts) {
+      state.pickSolidCell(p.$1, p.$2);
+    }
+    state.finishSolid();
+
+    final solids = parseSolids(world.segments.first.instructions);
+    expect(solids.length, 4);
+    expect(solids.every((s) => s.points.length == 3), isTrue);
+  });
+
+  test('重叠的段会被校验出来', () {
+    final a = Segment(
+      SegmentSpec(id: 'a', file: 'a.seg', originCol: 0, originRow: 0),
+      ['....', '....'],
+    );
+    final b = Segment(
+      SegmentSpec(id: 'b', file: 'b.seg', originCol: 2, originRow: 1),
+      ['....', '....'],
+    );
+    final world = World(
+      dirPath: '',
+      name: 'w',
+      segments: [a, b],
+      portalPlanes: [],
+      raw: <String, dynamic>{},
+    );
+
+    final errors = WorldIo.validate(world, {'.'});
+    expect(errors.any((e) => e.contains('重叠')), isTrue);
   });
 }

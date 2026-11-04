@@ -140,7 +140,7 @@ class DeleteSegmentDialog extends StatelessWidget {
           ),
           const SizedBox(height: JoSpace.s3),
           Text(
-            '确定删除「$name」？段文件会一并删除，不能撤销。',
+            '确定删除“$name”？段文件会一并删除，不能撤销。',
             style: JoTheme.meta(context).copyWith(color: p.text),
           ),
           const SizedBox(height: JoSpace.s4),

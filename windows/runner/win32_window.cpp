@@ -15,6 +15,22 @@ namespace {
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
 #endif
+// Windows 11. Redefined in case the SDK is older.
+#ifndef DWMWA_BORDER_COLOR
+#define DWMWA_BORDER_COLOR 34
+#endif
+#ifndef DWMWA_CAPTION_COLOR
+#define DWMWA_CAPTION_COLOR 35
+#endif
+#ifndef DWMWA_TEXT_COLOR
+#define DWMWA_TEXT_COLOR 36
+#endif
+#ifndef DWMWA_SYSTEMBACKDROP_TYPE
+#define DWMWA_SYSTEMBACKDROP_TYPE 38
+#endif
+
+// DWMSBT_NONE: no Mica, no Acrylic - a plain opaque frame.
+static const int kBackdropNone = 1;
 
 constexpr const wchar_t kWindowClassName[] = L"FLUTTER_RUNNER_WIN32_WINDOW";
 
@@ -197,6 +213,16 @@ Win32Window::MessageHandler(HWND hwnd,
 
       return 0;
     }
+    case WM_GETMINMAXINFO: {
+      // Minimum window size: 800 x 600 logical pixels, scaled by monitor DPI.
+      HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+      double scale_factor = FlutterDesktopGetDpiForMonitor(monitor) / 96.0;
+      auto* info = reinterpret_cast<MINMAXINFO*>(lparam);
+      info->ptMinTrackSize.x = Scale(800, scale_factor);
+      info->ptMinTrackSize.y = Scale(600, scale_factor);
+      return 0;
+    }
+
     case WM_SIZE: {
       RECT rect = GetClientArea();
       if (child_content_ != nullptr) {
@@ -272,7 +298,38 @@ void Win32Window::OnDestroy() {
   // No-op; provided for subclasses.
 }
 
+void Win32Window::SetCaptionColors(COLORREF caption, COLORREF text,
+                                   COLORREF border, bool dark) {
+  if (!window_handle_) {
+    return;
+  }
+  custom_caption_ = true;
+
+  int backdrop = kBackdropNone;
+  DwmSetWindowAttribute(window_handle_, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop,
+                        sizeof(backdrop));
+
+  BOOL use_dark = dark ? TRUE : FALSE;
+  DwmSetWindowAttribute(window_handle_, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                        &use_dark, sizeof(use_dark));
+  DwmSetWindowAttribute(window_handle_, DWMWA_CAPTION_COLOR, &caption,
+                        sizeof(caption));
+  DwmSetWindowAttribute(window_handle_, DWMWA_TEXT_COLOR, &text, sizeof(text));
+  DwmSetWindowAttribute(window_handle_, DWMWA_BORDER_COLOR, &border,
+                        sizeof(border));
+
+  // Repaint the non-client area so the new colors show right away.
+  SetWindowPos(window_handle_, nullptr, 0, 0, 0, 0,
+               SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+}
+
 void Win32Window::UpdateTheme(HWND const window) {
+  // The app owns the caption colors once it has set them; don't let the
+  // system's light/dark preference override them.
+  if (custom_caption_) {
+    return;
+  }
+
   DWORD light_mode;
   DWORD light_mode_size = sizeof(light_mode);
   LSTATUS result = RegGetValue(HKEY_CURRENT_USER, kGetPreferredBrightnessRegKey,

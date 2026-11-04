@@ -251,6 +251,30 @@ class WorldIo {
   /// 校验：行宽一致、字符都在地形表里
   static List<String> validate(World world, Set<String> codes) {
     final errors = <String>[];
+
+    // 段之间不允许重叠：同一坐标被两个段覆盖时，引擎取先命中的那个。
+    for (int i = 0; i < world.segments.length; i++) {
+      final Segment a = world.segments[i];
+      final int ax1 = a.spec.originCol;
+      final int ay1 = a.spec.originRow;
+      final int ax2 = ax1 + a.width;
+      final int ay2 = ay1 + a.height;
+
+      for (int j = i + 1; j < world.segments.length; j++) {
+        final Segment b = world.segments[j];
+        final int bx1 = b.spec.originCol;
+        final int by1 = b.spec.originRow;
+        final int bx2 = bx1 + b.width;
+        final int by2 = by1 + b.height;
+
+        final bool overlapX = ax1 < bx2 && bx1 < ax2;
+        final bool overlapY = ay1 < by2 && by1 < ay2;
+        if (overlapX && overlapY) {
+          errors.add('段 ${a.spec.id} 与 ${b.spec.id} 重叠');
+        }
+      }
+    }
+
     for (final segment in world.segments) {
       final width = segment.width;
       for (var r = 0; r < segment.height; r++) {
