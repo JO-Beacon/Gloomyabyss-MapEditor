@@ -1,0 +1,12 @@
+# 文本统一 LF
+* text=auto eol=lf
+
+# 二进制，不做换行转换
+*.png binary
+*.jpg binary
+*.ico binary
+*.ttf binary
+*.otf binary
+*.dll binary
+*.exe binary
+*.zip binary

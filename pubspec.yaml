@@ -1,0 +1,30 @@
+name: gloomyabyss_map_editor
+description: "Gloomyabyss 地图编辑器"
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.13.5
+
+dependencies:
+  flutter:
+    sdk: flutter
+  file_picker: ^13.3.2
+  jo_draftui:
+    path: ../JO-DraftUI/flutter
+  markdown: ^7.3.1
+  window_manager: ^0.6.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: false
+  assets:
+    - assets/default/terrain.json
+    - assets/default/props.json
+    - assets/default/objects.json
+    - THIRD-PARTY-NOTICES.md
+    - licenses/

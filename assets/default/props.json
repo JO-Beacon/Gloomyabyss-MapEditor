@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "types": [
+    {
+      "id": "box",
+      "name": "BOX",
+      "sprite": "Spr_Box",
+      "block": true,
+      "width": 1,
+      "height": 1,
+      "interaction": "box"
+    }
+  ]
+}

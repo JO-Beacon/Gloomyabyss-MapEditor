@@ -1,0 +1,25 @@
+JO-DraftUI
+Copyright (C) 2026 JO-Beacon
+
+本库包含的第三方资源：
+
+- Remix Icon (https://remixicon.com)
+  assets/fonts/remixicon.ttf（图标字体）
+  许可：Remix Icon License v1.0
+  全文：assets/licenses/RemixIcon-License-1.0.txt
+
+- Noto Sans SC / Noto Serif SC（思源黑体 / 思源宋体）
+  assets/fonts/NotoSansSC-VF.ttf、assets/fonts/NotoSerifSC-VF.ttf
+  许可：SIL Open Font License 1.1
+  全文：assets/licenses/SourceHanSans-OFL-1.1.txt
+
+- Noto Sans Mono
+  assets/fonts/NotoSansMono-VF.ttf
+  许可：SIL Open Font License 1.1
+  全文：assets/licenses/NotoSansMono-OFL-1.1.txt
+
+- markdown（Dart 包，BSD-3-Clause，Dart 项目作者）
+  仅 Flutter 适配使用；许可全文见 https://github.com/dart-lang/markdown/blob/master/LICENSE
+
+- url_launcher（Flutter 团队，BSD-3-Clause）
+  仅 Flutter 适配的 Markdown 链接使用

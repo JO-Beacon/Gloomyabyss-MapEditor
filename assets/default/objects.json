@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "types": [
+    {
+      "id": "Obj_Froggit",
+      "name": "Froggit"
+    }
+  ]
+}
