@@ -53,6 +53,8 @@ class MapCanvas extends StatefulWidget {
     this.linePickStart,
     this.portalEraseMode = false,
     this.onPortalEraseCell,
+    this.fitEpoch = 0,
+    this.onViewChanged,
   });
 
   final World world;
@@ -109,13 +111,15 @@ class MapCanvas extends StatefulWidget {
   final bool portalEraseMode;
   final void Function(int col, int row)? onPortalEraseCell;
 
+  /// 外部递增这个值就会重新进入适应窗口模式。
+  final int fitEpoch;
+  final void Function(double scale, double fitScale, bool fit)? onViewChanged;
+
   @override
   State<MapCanvas> createState() => _MapCanvasState();
 }
 
 class _MapCanvasState extends State<MapCanvas> {
-  static const double _minScale = 4;
-  static const double _maxScale = 64;
 
   double? _scale;
   Offset _pan = Offset.zero;
@@ -134,7 +138,8 @@ class _MapCanvasState extends State<MapCanvas> {
   @override
   void didUpdateWidget(covariant MapCanvas oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.world != widget.world) {
+    if (oldWidget.world != widget.world ||
+        oldWidget.fitEpoch != widget.fitEpoch) {
       _fit = true;
       _pan = Offset.zero;
     }
@@ -151,7 +156,12 @@ class _MapCanvasState extends State<MapCanvas> {
     return fit.clamp(2.0, 32.0);
   }
 
-  double get _effectiveScale => _fit ? _fitScale(_viewport) : (_scale ?? 16);
+  double get _minZoom => math.min(4.0, _fitScale(_viewport));
+  double get _maxZoom => _fitScale(_viewport) * 20;
+
+  double get _effectiveScale => _fit
+      ? _fitScale(_viewport)
+      : (_scale ?? 16).clamp(_minZoom, _maxZoom);
 
   Offset get _baseOffset {
     final scale = _effectiveScale;
@@ -190,7 +200,7 @@ class _MapCanvasState extends State<MapCanvas> {
     final scale = _effectiveScale;
     final pos = event.localPosition;
     final factor = event.scrollDelta.dy < 0 ? 1.12 : 1 / 1.12;
-    final next = (scale * factor).clamp(_minScale, _maxScale);
+    final next = (scale * factor).clamp(_minZoom, _maxZoom);
     if (next == scale) return;
 
     final world = (pos - _offset) / scale;
@@ -222,6 +232,12 @@ class _MapCanvasState extends State<MapCanvas> {
         _viewport = Size(constraints.maxWidth, constraints.maxHeight);
         final scale = _effectiveScale;
         final offset = _offset;
+        if (widget.onViewChanged != null) {
+          final double fitScale = _fitScale(_viewport);
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            widget.onViewChanged?.call(scale, fitScale, _fit);
+          });
+        }
 
         return ClipRect(
           child: Listener(
@@ -1024,13 +1040,6 @@ class _WorldPainter extends CustomPainter {
     return null;
   }
 
-  Offset _portalMid(LinePortal p, Segment seg) {
-    return Offset(
-      (seg.spec.originCol + (p.x + p.endX) / 2) * scale,
-      (seg.spec.originRow + (p.y + p.endY) / 2) * scale,
-    );
-  }
-
   /// 起点侧：A 面 = 左/上，B 面 = 右/下。
   Offset _portalFace(LinePortal p, Segment seg, bool aFace) {
     final double x = p.horizontal
@@ -1164,49 +1173,6 @@ class _WorldPainter extends CustomPainter {
       ..style = PaintingStyle.stroke;
     canvas.drawLine(tip, left, stroke);
     canvas.drawLine(tip, right, stroke);
-  }
-
-  void _paintPlaneCross(Canvas canvas) {
-    for (int i = 0; i < world.portalPlanes.length; i++) {
-      final PortalPlane plane = world.portalPlanes[i];
-      final bool selected = i == selectedPlane;
-      final bool horizontal = plane.axis == 'x';
-      final Offset a = horizontal
-          ? Offset(plane.at * scale, plane.from * scale)
-          : Offset(plane.from * scale, plane.at * scale);
-      final Offset b = horizontal
-          ? Offset(plane.at * scale, plane.to * scale)
-          : Offset(plane.to * scale, plane.at * scale);
-      final Offset delta = Offset(plane.dx * scale, plane.dy * scale);
-      final Offset a2 = a + delta;
-      final Offset b2 = b + delta;
-
-      const Color white = Color(0xFFFFFFFF);
-      final Paint solid = Paint()
-        ..color = white
-        ..strokeWidth = selected ? 3 : 2;
-
-      canvas.drawLine(a, b, solid);
-      canvas.drawLine(a2, b2, solid);
-      _drawDashed(canvas, a, a2, white.withValues(alpha: 0.3));
-      _drawDashed(canvas, b, b2, white.withValues(alpha: 0.3));
-
-      final Offset mid = Offset((a2.dx + b2.dx) / 2, (a2.dy + b2.dy) / 2);
-      final double sign = plane.direction == '+' ? 1 : -1;
-      const double s6 = 6;
-      final Path arrow = Path();
-      if (horizontal) {
-        arrow.moveTo(mid.dx + sign * s6, mid.dy);
-        arrow.lineTo(mid.dx - sign * s6, mid.dy - s6);
-        arrow.lineTo(mid.dx - sign * s6, mid.dy + s6);
-      } else {
-        arrow.moveTo(mid.dx, mid.dy + sign * s6);
-        arrow.lineTo(mid.dx - s6, mid.dy - s6);
-        arrow.lineTo(mid.dx + s6, mid.dy - s6);
-      }
-      arrow.close();
-      canvas.drawPath(arrow, Paint()..color = white);
-    }
   }
 
   @override

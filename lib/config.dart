@@ -14,6 +14,13 @@ class AppSettings extends ChangeNotifier {
   double rightWidth = 300;
   double layerHeight = 120;
   double portalListHeight = 240;
+  Map<String, String> bindings = <String, String>{
+    'save': 'Ctrl+S',
+    'undo': 'Ctrl+Z',
+    'redo': 'Ctrl+Y',
+    'fit': 'Ctrl+0',
+    'delete': 'Delete',
+  };
 
   AppSettings() {
     _load();
@@ -39,6 +46,13 @@ class AppSettings extends ChangeNotifier {
       layerHeight = ((decoded['layer_height'] as num?) ?? 120).toDouble();
       portalListHeight =
           ((decoded['portal_list_height'] as num?) ?? 240).toDouble();
+      final Object? b = decoded['bindings'];
+      if (b is Map) {
+        for (final key in bindings.keys.toList()) {
+          final Object? v = b[key];
+          if (v is String) bindings[key] = v;
+        }
+      }
     } catch (_) {
       // 设置文件坏了就用默认值，不阻塞启动。
     }
@@ -54,6 +68,7 @@ class AppSettings extends ChangeNotifier {
         'right_width': rightWidth,
         'layer_height': layerHeight,
         'portal_list_height': portalListHeight,
+        'bindings': bindings,
       }));
     } catch (_) {
       // 写不进去就算了，不影响使用。
@@ -89,6 +104,12 @@ class AppSettings extends ChangeNotifier {
 
   void setPortalListHeight(double value) {
     portalListHeight = value;
+    notifyListeners();
+  }
+
+  void setBinding(String action, String spec) {
+    bindings[action] = spec;
+    _save();
     notifyListeners();
   }
 

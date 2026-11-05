@@ -1,0 +1,159 @@
+name: Build Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: '上传到 GitHub Release 草稿'
+        required: false
+        default: false
+        type: boolean
+      release_tag:
+        description: 'Release 标签，例如 0.1.0+1'
+        required: false
+        default: ''
+        type: string
+      prerelease:
+        description: '标记为预发布版本'
+        required: false
+        default: false
+        type: boolean
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+\+[0-9]+'
+
+permissions:
+  contents: write
+
+env:
+  FLUTTER_VERSION: '3.47.6'
+  INNO_SETUP_VERSION: '7.0.2'
+  INNO_SETUP_URL: 'https://github.com/jrsoftware/issrc/releases/download/is-7_0_2/innosetup-7.0.2-x64.exe'
+  INNO_SETUP_SHA256: '5ad54ca3def786f8f4212552e54cc6d8d61329e2d24a1cfee0571d42c2684ff1'
+
+jobs:
+  build-windows-x64:
+    name: Build Windows x64
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Resolve version
+        shell: pwsh
+        env:
+          PUBLISH_RELEASE: ${{ inputs.publish_release || false }}
+          RELEASE_TAG: ${{ inputs.release_tag || '' }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rawVersion = ((Select-String -Path pubspec.yaml -Pattern '^version:\s*(\S+)' | Select-Object -First 1).Matches[0].Groups[1].Value)
+          $releaseVersion = $rawVersion.Split('+')[0]
+          $version = $rawVersion
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            if ($env:GITHUB_REF_NAME -ne $rawVersion) {
+              throw "Tag $env:GITHUB_REF_NAME does not match pubspec version $rawVersion."
+            }
+          } elseif ($env:PUBLISH_RELEASE -eq 'true') {
+            if ($env:RELEASE_TAG -ne $rawVersion) {
+              throw "Release tag must be $rawVersion."
+            }
+          } else {
+            $shortSha = (git rev-parse --short HEAD).Trim()
+            $version = "${version}_${shortSha}"
+          }
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Resolved version: $version"
+
+      - name: Verify release notes
+        if: ${{ github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.publish_release && inputs.release_tag != '') }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $target = '${{ github.ref_type == 'tag' && github.ref_name || inputs.release_tag }}'
+          $notes = ".github/release-notes/$target.md"
+          if (-not (Test-Path -LiteralPath $notes)) {
+            throw "Release notes missing: $notes. Prepare them before tagging."
+          }
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      - name: Build and package
+        shell: pwsh
+        run: ./tool/package_windows.ps1 -Out dist
+
+      - name: Package portable ZIP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $file = "GloomyabyssMapEditor-v$env:VERSION-windows-x64-portable.zip"
+          Compress-Archive -Path 'dist/GloomyabyssMapEditor/*' -DestinationPath $file
+
+      - name: Setup Inno Setup 7
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $env:RUNNER_TEMP "innosetup-$env:INNO_SETUP_VERSION-x64.exe"
+          Invoke-WebRequest -Uri $env:INNO_SETUP_URL -OutFile $installer -UseBasicParsing
+          $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash.ToLowerInvariant()
+          if ($actualHash -ne $env:INNO_SETUP_SHA256) {
+            throw "Inno Setup checksum mismatch: $actualHash"
+          }
+          $process = Start-Process -FilePath $installer -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Inno Setup installer failed with exit code $($process.ExitCode)"
+          }
+          $iscc = Join-Path $env:ProgramFiles 'Inno Setup 7\ISCC.exe'
+          if (-not (Test-Path -LiteralPath $iscc)) {
+            throw "Inno Setup 7 compiler not found: $iscc"
+          }
+          "INNO_SETUP_COMPILER=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Package setup EXE
+        shell: pwsh
+        run: ./tool/build_installer.ps1 -AppVersion $env:VERSION -OutputDir . -InnoSetupCompiler "$env:INNO_SETUP_COMPILER"
+
+      - name: Generate SHA-256 checksums
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Get-ChildItem -File 'GloomyabyssMapEditor-v*-windows-x64-*' | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)" | Set-Content -LiteralPath "$($_.FullName).sha256" -Encoding ascii
+          }
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-x64
+          path: |
+            GloomyabyssMapEditor-v*-windows-x64-portable.zip
+            GloomyabyssMapEditor-v*-windows-x64-portable.zip.sha256
+            GloomyabyssMapEditor-v*-windows-x64-setup.exe
+            GloomyabyssMapEditor-v*-windows-x64-setup.exe.sha256
+          if-no-files-found: error
+
+      - name: Upload assets to draft GitHub Release
+        if: ${{ github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.publish_release && inputs.release_tag != '') }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || inputs.release_tag }}
+          name: ${{ github.ref_type == 'tag' && github.ref_name || inputs.release_tag }}
+          body_path: .github/release-notes/${{ github.ref_type == 'tag' && github.ref_name || inputs.release_tag }}.md
+          draft: true
+          prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}
+          files: |
+            GloomyabyssMapEditor-v*-windows-x64-portable.zip
+            GloomyabyssMapEditor-v*-windows-x64-portable.zip.sha256
+            GloomyabyssMapEditor-v*-windows-x64-setup.exe
+            GloomyabyssMapEditor-v*-windows-x64-setup.exe.sha256

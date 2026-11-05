@@ -44,6 +44,10 @@ class _EditorPageState extends State<EditorPage> {
   String _portalLinkFace = 'A';
   int _selectedPortalLink = -1;
   final TextEditingController _portalNameCtrl = TextEditingController();
+  int _fitEpoch = 0;
+  double _zoomScale = 1;
+  double _fitScale = 1;
+  bool _fit = true;
 
 
   static const MethodChannel _windowChannel = MethodChannel('jodraft/window');
@@ -206,13 +210,51 @@ class _EditorPageState extends State<EditorPage> {
     }
   }
 
+  String? _specOf(KeyEvent event) {
+    final LogicalKeyboardKey k = event.logicalKey;
+    if (k == LogicalKeyboardKey.controlLeft ||
+        k == LogicalKeyboardKey.controlRight ||
+        k == LogicalKeyboardKey.shiftLeft ||
+        k == LogicalKeyboardKey.shiftRight ||
+        k == LogicalKeyboardKey.altLeft ||
+        k == LogicalKeyboardKey.altRight ||
+        k == LogicalKeyboardKey.metaLeft ||
+        k == LogicalKeyboardKey.metaRight) {
+      return null;
+    }
+    final HardwareKeyboard kb = HardwareKeyboard.instance;
+    final List<String> parts = <String>[];
+    if (kb.isControlPressed) parts.add('Ctrl');
+    if (kb.isShiftPressed) parts.add('Shift');
+    if (kb.isAltPressed) parts.add('Alt');
+    final String label = k.keyLabel;
+    if (label.isEmpty) return null;
+    parts.add(label);
+    return parts.join('+');
+  }
+
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    final String? spec = _specOf(event);
+    if (spec == null) return KeyEventResult.ignored;
+    final Map<String, String> b = appSettings.bindings;
 
-    final key0 = event.logicalKey;
-    if (key0 == LogicalKeyboardKey.delete || key0 == LogicalKeyboardKey.backspace) {
-      if (!JoTextField.isEditing &&
-          _panelTab == 5 &&
+    // 保存始终归编辑器，输入框里也能用
+    if (spec == b['save']) {
+      if (state.world != null) state.save();
+      return KeyEventResult.handled;
+    }
+
+    // 输入框聚焦时，其余快捷键让给输入框
+    if (JoTextField.isEditing) return KeyEventResult.ignored;
+
+    if (spec == b['fit']) {
+      setState(() => _fitEpoch++);
+      return KeyEventResult.handled;
+    }
+
+    if (spec == b['delete']) {
+      if (_panelTab == 5 &&
           !state.solidPick &&
           state.selectedSolid >= 0 &&
           state.selectedSolid < state.solids.length) {
@@ -221,29 +263,11 @@ class _EditorPageState extends State<EditorPage> {
       }
     }
 
-    final keyboard = HardwareKeyboard.instance;
-    if (!keyboard.isControlPressed) return KeyEventResult.ignored;
-
-    final key = event.logicalKey;
-
-    // Ctrl+S 始终归编辑器，输入框里也能保存
-    if (key == LogicalKeyboardKey.keyS) {
-      if (state.world != null) state.save();
+    if (spec == b['undo']) {
+      state.undo();
       return KeyEventResult.handled;
     }
-
-    // 撤销/重做在输入框聚焦时让给输入框自己
-    if (JoTextField.isEditing) return KeyEventResult.ignored;
-
-    if (key == LogicalKeyboardKey.keyZ) {
-      if (keyboard.isShiftPressed) {
-        state.redo();
-      } else {
-        state.undo();
-      }
-      return KeyEventResult.handled;
-    }
-    if (key == LogicalKeyboardKey.keyY) {
+    if (spec == b['redo']) {
       state.redo();
       return KeyEventResult.handled;
     }
@@ -290,6 +314,10 @@ class _EditorPageState extends State<EditorPage> {
         ]),
         JoMenu('视图', [
           JoMenuItem('校验地图', onTap: state.world == null ? null : state.validate),
+          JoMenuItem(
+            '适应窗口',
+            onTap: () => setState(() => _fitEpoch++),
+          ),
           const JoMenuItem('', divider: true),
           JoMenuItem(
             '重置布局',
@@ -434,7 +462,7 @@ class _EditorPageState extends State<EditorPage> {
                 JoSpace.s2,
                 JoSpace.s3,
               ),
-              child: state.worlds.isEmpty
+              child: !appSettings.developerMode || state.worlds.isEmpty
                   ? Text(
                       state.world?.name ?? '未打开',
                       style: JoTheme.ui(context).copyWith(
@@ -574,6 +602,18 @@ class _EditorPageState extends State<EditorPage> {
       linePortalMode: _panelTab == 3 && _currentTool == 1,
       portalEraseMode: _panelTab == 3 && _currentTool == 2,
       onPortalEraseCell: state.eraseLinePortalWorld,
+      fitEpoch: _fitEpoch,
+      onViewChanged: (scale, fitScale, fit) {
+        if ((scale - _zoomScale).abs() > 0.001 ||
+            (fitScale - _fitScale).abs() > 0.001 ||
+            fit != _fit) {
+          setState(() {
+            _zoomScale = scale;
+            _fitScale = fitScale;
+            _fit = fit;
+          });
+        }
+      },
       onLinePortalCell: (int c, int r) {
         if (!state.linePortalPick) state.toggleLinePortalPick();
         state.pickLinePortalWorld(c, r);
@@ -1272,77 +1312,6 @@ class _EditorPageState extends State<EditorPage> {
     );
   }
 
-  String _planeExitLabel(PortalPlane plane) {
-    if (plane.axis == 'x') {
-      final x = plane.at + plane.dx;
-      final y1 = plane.from + plane.dy;
-      final y2 = plane.to + plane.dy;
-      return '方向 ${plane.direction}  出口 x=$x  y=$y1→$y2';
-    }
-    final y = plane.at + plane.dy;
-    final x1 = plane.from + plane.dx;
-    final x2 = plane.to + plane.dx;
-    return '方向 ${plane.direction}  出口 y=$y  x=$x1→$x2';
-  }
-
-  Widget _planeEditor(JoPalette p, PortalPlane plane) {
-    final segment = state.segment;
-    final width = segment?.width ?? 0;
-    final height = segment?.height ?? 0;
-    final horizontal = plane.axis == 'x';
-    final maxAt = horizontal ? width : height;
-    final maxTo = horizontal ? height : width;
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _label(p, '轴'),
-        JoSegment<String>(
-          options: const [
-            (label: 'x（竖线）', value: 'x'),
-            (label: 'y（横线）', value: 'y'),
-          ],
-          value: plane.axis,
-          onChanged: (v) {
-            final maxA = v == 'x' ? width : height;
-            final maxB = v == 'x' ? height : width;
-            state.updatePlane(
-              plane,
-              axis: v,
-              at: plane.at.clamp(0, maxA).toInt(),
-              to: plane.to.clamp(0, maxB).toInt(),
-              from: plane.from.clamp(0, maxB).toInt(),
-            );
-            state.cancelPick();
-          },
-        ),
-        const SizedBox(height: JoSpace.s3),
-        _label(p, '方向'),
-        JoSegment<String>(
-          options: const [
-            (label: '+', value: '+'),
-            (label: '-', value: '-'),
-          ],
-          value: plane.direction,
-          onChanged: (v) => state.updatePlane(plane, direction: v),
-        ),
-        const SizedBox(height: JoSpace.s3),
-        _numRow(p, '位置 at', plane.at, 0, maxAt,
-            (v) => state.updatePlane(plane, at: v)),
-        _numRow(p, '起 from', plane.from, 0, maxTo,
-            (v) => state.updatePlane(plane, from: v)),
-        _numRow(p, '止 to', plane.to, 0, maxTo,
-            (v) => state.updatePlane(plane, to: v)),
-        const SizedBox(height: JoSpace.s2),
-        _label(p, '目标坐标'),
-        _numRow(p, 'dx', plane.dx, -64, 64,
-            (v) => state.updatePlane(plane, dx: v)),
-        _numRow(p, 'dy', plane.dy, -64, 64,
-            (v) => state.updatePlane(plane, dy: v)),
-      ],
-    );
-  }
-
   Widget _segmentPanel(JoPalette p) {
     final segment = state.segment;
     if (segment == null) {
@@ -1470,7 +1439,10 @@ class _EditorPageState extends State<EditorPage> {
           ? (state.notice ?? '就绪')
           : '${errors.length} 个问题：${errors.first}',
       error: errors.isNotEmpty,
-      right: segment == null ? null : '${segment.width}×${segment.height} 格',
+      right: segment == null
+          ? null
+          : '${_fit ? '自适应' : '${(_zoomScale / _fitScale * 100).round()}%'}'
+              '  ${segment.width}×${segment.height} 格',
     );
   }
 
@@ -1497,7 +1469,7 @@ class _EditorPageState extends State<EditorPage> {
           ],
         );
         break;
-      default:
+      case 1:
         page = Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -1520,6 +1492,38 @@ class _EditorPageState extends State<EditorPage> {
               '开启后显示打开世界目录、导入到世界目录等入口。',
               style: JoTheme.meta(context).copyWith(color: p.secondary),
             ),
+          ],
+        );
+        break;
+      default:
+        page = Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            for (final entry in const [
+              ('save', '保存'),
+              ('undo', '撤销'),
+              ('redo', '重做'),
+              ('fit', '适应窗口'),
+              ('delete', '删除'),
+            ])
+              Padding(
+                padding: const EdgeInsets.only(bottom: JoSpace.s2),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        entry.$2,
+                        style: JoTheme.ui(context)
+                            .copyWith(fontSize: 13, color: p.text),
+                      ),
+                    ),
+                    JoKeyField(
+                      spec: appSettings.bindings[entry.$1] ?? '',
+                      onChanged: (v) => appSettings.setBinding(entry.$1, v),
+                    ),
+                  ],
+                ),
+              ),
           ],
         );
     }
@@ -1577,6 +1581,11 @@ class _EditorPageState extends State<EditorPage> {
                                     title: '开发者',
                                     selected: _prefsTab == 1,
                                     onTap: () => setState(() => _prefsTab = 1),
+                                  ),
+                                  JoListRow(
+                                    title: '快捷键',
+                                    selected: _prefsTab == 2,
+                                    onTap: () => setState(() => _prefsTab = 2),
                                   ),
                                 ],
                               ),
