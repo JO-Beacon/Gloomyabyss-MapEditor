@@ -6,6 +6,7 @@ class SegmentSpec {
   String file;
   int originCol;
   int originRow;
+  int originZ;
   String repeat; // "" / "x" / "y" / "xy"
   int repeatCount; // 0 = infinite
 
@@ -14,6 +15,7 @@ class SegmentSpec {
     required this.file,
     this.originCol = 0,
     this.originRow = 0,
+    this.originZ = 0,
     this.repeat = '',
     this.repeatCount = 0,
   });
@@ -25,6 +27,7 @@ class SegmentSpec {
       file: json['file'] as String,
       originCol: origin[0].toInt(),
       originRow: origin[1].toInt(),
+      originZ: origin[2].toInt(),
       repeat: (json['repeat'] as String?) ?? '',
       repeatCount: ((json['repeat_count'] as num?) ?? 0).toInt(),
     );
@@ -33,7 +36,7 @@ class SegmentSpec {
   Map<String, dynamic> toJson() => {
         'id': id,
         'file': file,
-        'origin': [originCol, originRow],
+        'origin': [originCol, originRow, originZ],
         if (repeat.isNotEmpty) 'repeat': repeat,
         if (repeat.isNotEmpty) 'repeat_count': repeatCount,
       };
@@ -142,6 +145,44 @@ class World {
     required this.raw,
   });
 
+  int get minCol {
+    if (segments.isEmpty) return 0;
+    int v = segments.first.spec.originCol;
+    for (final s in segments) {
+      if (s.spec.originCol < v) v = s.spec.originCol;
+    }
+    return v;
+  }
+
+  int get minRow {
+    if (segments.isEmpty) return 0;
+    int v = segments.first.spec.originRow;
+    for (final s in segments) {
+      if (s.spec.originRow < v) v = s.spec.originRow;
+    }
+    return v;
+  }
+
+  int get maxCol {
+    if (segments.isEmpty) return 0;
+    int v = segments.first.spec.originCol + segments.first.width;
+    for (final s in segments) {
+      final int e = s.spec.originCol + s.width;
+      if (e > v) v = e;
+    }
+    return v;
+  }
+
+  int get maxRow {
+    if (segments.isEmpty) return 0;
+    int v = segments.first.spec.originRow + segments.first.height;
+    for (final s in segments) {
+      final int e = s.spec.originRow + s.height;
+      if (e > v) v = e;
+    }
+    return v;
+  }
+
   Segment? segmentById(String id) {
     for (final s in segments) {
       if (s.spec.id == id) return s;
@@ -246,6 +287,18 @@ class WorldIo {
     for (final entry in files.entries) {
       File('${world.dirPath}$sep${entry.key}').writeAsStringSync(entry.value);
     }
+
+    // 清理不再被引用的段文件：只有保存时才动磁盘。
+    final dir = Directory(world.dirPath);
+    if (!dir.existsSync()) return;
+    for (final entity in dir.listSync()) {
+      if (entity is! File) continue;
+      final name = entity.uri.pathSegments.last;
+      if (!name.endsWith('.seg')) continue;
+      if (!files.containsKey(name)) {
+        entity.deleteSync();
+      }
+    }
   }
 
   /// 校验：行宽一致、字符都在地形表里
@@ -267,6 +320,7 @@ class WorldIo {
         final int bx2 = bx1 + b.width;
         final int by2 = by1 + b.height;
 
+        if (a.spec.originZ != b.spec.originZ) continue;
         final bool overlapX = ax1 < bx2 && bx1 < ax2;
         final bool overlapY = ay1 < by2 && by1 < ay2;
         if (overlapX && overlapY) {

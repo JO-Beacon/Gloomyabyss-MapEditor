@@ -6,6 +6,7 @@ import 'package:jo_draftui/jo_draftui.dart';
 
 import '../models/obj.dart';
 import '../models/prop.dart';
+import '../models/line_portal.dart';
 import '../models/solid.dart';
 import '../models/terrain.dart';
 import '../models/world.dart';
@@ -13,8 +14,11 @@ import '../models/world.dart';
 class MapCanvas extends StatefulWidget {
   const MapCanvas({
     super.key,
-    required this.segment,
+    required this.world,
     required this.terrain,
+    required this.selectedSegment,
+    this.level = 0,
+    this.paintEnabled = true,
     required this.selectedCode,
     required this.onPaint,
     required this.onStrokeStart,
@@ -42,10 +46,20 @@ class MapCanvas extends StatefulWidget {
     this.selectedSolid = -1,
     this.padMode = false,
     this.onPadCell,
+    this.selectedPlane = -1,
+    this.linePortalMode = false,
+    this.onLinePortalCell,
+    this.selectedLinePortal = -1,
+    this.linePickStart,
+    this.portalEraseMode = false,
+    this.onPortalEraseCell,
   });
 
-  final Segment segment;
+  final World world;
   final TerrainSet terrain;
+  final int selectedSegment;
+  final int level;
+  final bool paintEnabled;
   final String selectedCode;
   final void Function(int col, int row) onPaint;
   final VoidCallback onStrokeStart;
@@ -85,6 +99,16 @@ class MapCanvas extends StatefulWidget {
   final bool padMode;
   final void Function(int col, int row)? onPadCell;
 
+  /// 当前选中的传送门平面下标；-1 表示没有。
+  final int selectedPlane;
+
+  final bool linePortalMode;
+  final void Function(int col, int row)? onLinePortalCell;
+  final int selectedLinePortal;
+  final (int, int)? linePickStart;
+  final bool portalEraseMode;
+  final void Function(int col, int row)? onPortalEraseCell;
+
   @override
   State<MapCanvas> createState() => _MapCanvasState();
 }
@@ -99,6 +123,10 @@ class _MapCanvasState extends State<MapCanvas> {
 
   Size _viewport = Size.zero;
   bool _stroking = false;
+  int _strokeMode = 0; // 1 地形, 2 道具, 3 对象
+  bool _lineDragging = false;
+  Offset? _marqueeStart;
+  Offset? _marqueeCurrent;
   bool _panning = false;
   Offset _lastPointer = Offset.zero;
   (int, int)? _hoverCell;
@@ -106,16 +134,19 @@ class _MapCanvasState extends State<MapCanvas> {
   @override
   void didUpdateWidget(covariant MapCanvas oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.segment != widget.segment) {
+    if (oldWidget.world != widget.world) {
       _fit = true;
       _pan = Offset.zero;
     }
   }
 
+  int get _worldW => widget.world.maxCol - widget.world.minCol;
+  int get _worldH => widget.world.maxRow - widget.world.minRow;
+
   double _fitScale(Size viewport) {
-    final w = widget.segment.width;
-    final h = widget.segment.height;
-    if (w == 0 || h == 0) return 16;
+    final w = _worldW;
+    final h = _worldH;
+    if (w <= 0 || h <= 0) return 16;
     final fit = math.min(viewport.width / w, viewport.height / h);
     return fit.clamp(2.0, 32.0);
   }
@@ -125,8 +156,8 @@ class _MapCanvasState extends State<MapCanvas> {
   Offset get _baseOffset {
     final scale = _effectiveScale;
     return Offset(
-      (_viewport.width - widget.segment.width * scale) / 2,
-      (_viewport.height - widget.segment.height * scale) / 2,
+      (_viewport.width - _worldW * scale) / 2 - widget.world.minCol * scale,
+      (_viewport.height - _worldH * scale) / 2 - widget.world.minRow * scale,
     );
   }
 
@@ -164,8 +195,8 @@ class _MapCanvasState extends State<MapCanvas> {
 
     final world = (pos - _offset) / scale;
     final nextBase = Offset(
-      (_viewport.width - widget.segment.width * next) / 2,
-      (_viewport.height - widget.segment.height * next) / 2,
+      (_viewport.width - _worldW * next) / 2 - widget.world.minCol * next,
+      (_viewport.height - _worldH * next) / 2 - widget.world.minRow * next,
     );
     setState(() {
       _scale = next;
@@ -177,7 +208,7 @@ class _MapCanvasState extends State<MapCanvas> {
   @override
   Widget build(BuildContext context) {
     final p = JoTheme.of(context);
-    if (widget.segment.width == 0 || widget.segment.height == 0) {
+    if (widget.world.segments.isEmpty) {
       return Center(
         child: Text(
           '这个段没有数据',
@@ -214,11 +245,17 @@ class _MapCanvasState extends State<MapCanvas> {
                 }
                 if (widget.propMode) {
                   final (col, row) = _cellAt(event.localPosition);
+                  _stroking = true;
+                  _strokeMode = 2;
+                  widget.onStrokeStart();
                   widget.onPropCell?.call(col, row);
                   return;
                 }
                 if (widget.objectMode) {
                   final (col, row) = _cellAt(event.localPosition);
+                  _stroking = true;
+                  _strokeMode = 3;
+                  widget.onStrokeStart();
                   widget.onObjectCell?.call(col, row);
                   return;
                 }
@@ -242,7 +279,28 @@ class _MapCanvasState extends State<MapCanvas> {
                   widget.onPadCell?.call(cc, rr);
                   return;
                 }
+                if (widget.portalEraseMode) {
+                  final (int cc, int rr) = _cellAt(event.localPosition);
+                  _stroking = true;
+                  _strokeMode = 4;
+                  widget.onStrokeStart();
+                  widget.onPortalEraseCell?.call(cc, rr);
+                  return;
+                }
+                if (widget.linePortalMode) {
+                  final (int cc, int rr) = _cornerAt(event.localPosition);
+                  _lineDragging = true;
+                  widget.onLinePortalCell?.call(cc, rr);
+                  return;
+                }
+                if (!widget.paintEnabled) {
+                  _marqueeStart = event.localPosition;
+                  _marqueeCurrent = event.localPosition;
+                  setState(() {});
+                  return;
+                }
                 _stroking = true;
+                _strokeMode = 1;
                 widget.onStrokeStart();
                 _paintAt(event.localPosition);
               }
@@ -254,9 +312,43 @@ class _MapCanvasState extends State<MapCanvas> {
                 setState(() => _pan += delta);
                 return;
               }
-              if (_stroking) _paintAt(event.localPosition);
+              if (_marqueeStart != null) {
+                setState(() => _marqueeCurrent = event.localPosition);
+                return;
+              }
+              if (_lineDragging) {
+                final (int c, int r) = _cornerAt(event.localPosition);
+                if (_hoverCell != (c, r)) {
+                  setState(() => _hoverCell = (c, r));
+                }
+                return;
+              }
+              if (!_stroking) return;
+              if (_strokeMode == 1) {
+                _paintAt(event.localPosition);
+              } else if (_strokeMode == 2) {
+                final (int c, int r) = _cellAt(event.localPosition);
+                widget.onPropCell?.call(c, r);
+              } else if (_strokeMode == 3) {
+                final (int c, int r) = _cellAt(event.localPosition);
+                widget.onObjectCell?.call(c, r);
+              } else if (_strokeMode == 4) {
+                final (int c, int r) = _cellAt(event.localPosition);
+                widget.onPortalEraseCell?.call(c, r);
+              }
             },
             onPointerUp: (event) {
+              if (_marqueeStart != null) {
+                setState(() {
+                  _marqueeStart = null;
+                  _marqueeCurrent = null;
+                });
+              }
+              if (_lineDragging) {
+                _lineDragging = false;
+                final (int cc, int rr) = _cornerAt(event.localPosition);
+                widget.onLinePortalCell?.call(cc, rr);
+              }
               if (_stroking) {
                 _stroking = false;
                 widget.onStrokeEnd();
@@ -264,6 +356,12 @@ class _MapCanvasState extends State<MapCanvas> {
               _panning = false;
             },
             onPointerCancel: (event) {
+              if (_marqueeStart != null) {
+                setState(() {
+                  _marqueeStart = null;
+                  _marqueeCurrent = null;
+                });
+              }
               if (_stroking) {
                 _stroking = false;
                 widget.onStrokeEnd();
@@ -271,10 +369,15 @@ class _MapCanvasState extends State<MapCanvas> {
               _panning = false;
             },
             child: MouseRegion(
-              cursor: SystemMouseCursors.precise,
+              cursor: widget.paintEnabled
+                  ? SystemMouseCursors.precise
+                  : SystemMouseCursors.basic,
               onHover: (event) {
-                if (!widget.solidMode) return;
-                final (int c, int r) = _cornerAt(event.localPosition);
+                if (!widget.solidMode && !widget.linePortalMode) return;
+                final (int c, int r) =
+                    (widget.solidMode || widget.linePortalMode)
+                        ? _cornerAt(event.localPosition)
+                        : _cellAt(event.localPosition);
                 if (_hoverCell != (c, r)) {
                   setState(() => _hoverCell = (c, r));
                 }
@@ -286,8 +389,8 @@ class _MapCanvasState extends State<MapCanvas> {
               },
               child: CustomPaint(
                 size: Size.infinite,
-                painter: _MapPainter(
-                  segment: widget.segment,
+                painter: _WorldPainter(
+                  world: widget.world,
                   terrain: widget.terrain,
                   scale: scale,
                   offset: offset,
@@ -295,16 +398,20 @@ class _MapCanvasState extends State<MapCanvas> {
                   grid: p.border,
                   border: p.border,
                   accent: p.accent,
-                  highlight: widget.highlight,
-                  placedProps: widget.placedProps,
+                  selectedSegment: widget.selectedSegment,
+                  level: widget.level,
+                  selectedPlane: widget.selectedPlane,
+                  selectedLinePortal: widget.selectedLinePortal,
+                  linePickStart: widget.linePickStart,
                   propTypes: widget.propTypes,
-                  placedObjects: widget.placedObjects,
                   worldStartCol: widget.worldStartCol,
                   worldStartRow: widget.worldStartRow,
-                  solids: widget.solids,
                   solidDraft: widget.solidDraft,
-                  selectedSolid: widget.selectedSolid,
                   solidHoverCell: _hoverCell,
+                  marquee: _marqueeStart == null || _marqueeCurrent == null
+                      ? null
+                      : Rect.fromPoints(_marqueeStart!, _marqueeCurrent!),
+                  selectedSolid: widget.selectedSolid,
                   accentColor: p.accent,
                 ),
               ),
@@ -313,6 +420,37 @@ class _MapCanvasState extends State<MapCanvas> {
         );
       },
     );
+  }
+}
+
+void _drawDashedGradient(
+  Canvas canvas,
+  Offset a,
+  Offset b,
+  Color from,
+  Color to,
+) {
+  final double dx = b.dx - a.dx;
+  final double dy = b.dy - a.dy;
+  final double len = math.sqrt(dx * dx + dy * dy);
+  if (len <= 0) return;
+
+  const double dash = 6;
+  const double gap = 4;
+  final double ux = dx / len;
+  final double uy = dy / len;
+  final Paint paint = Paint()..strokeWidth = 1;
+
+  double t = 0;
+  while (t < len) {
+    final double end = math.min(t + dash, len);
+    paint.color = Color.lerp(from, to, (t / len).clamp(0.0, 1.0))!;
+    canvas.drawLine(
+      Offset(a.dx + ux * t, a.dy + uy * t),
+      Offset(a.dx + ux * end, a.dy + uy * end),
+      paint,
+    );
+    t = end + gap;
   }
 }
 
@@ -374,6 +512,7 @@ class _MapPainter extends CustomPainter {
     required this.solidHoverCell,
     required this.selectedSolid,
     required this.accentColor,
+    this.drawBackground = true,
   });
 
   final Segment segment;
@@ -395,10 +534,13 @@ class _MapPainter extends CustomPainter {
   final (int, int)? solidHoverCell;
   final int selectedSolid;
   final Color accentColor;
+  final bool drawBackground;
 
   @override
   void paint(Canvas canvas, Size size) {
-    canvas.drawRect(Offset.zero & size, Paint()..color = background);
+    if (drawBackground) {
+      canvas.drawRect(Offset.zero & size, Paint()..color = background);
+    }
 
     canvas.save();
     canvas.translate(offset.dx, offset.dy);
@@ -539,8 +681,14 @@ class _MapPainter extends CustomPainter {
         );
       }
 
-      if (solidHoverCell != null) {
-        final (int hc, int hr) = solidHoverCell!;
+      final (int, int)? hoverLocal = solidHoverCell == null
+          ? null
+          : (
+              solidHoverCell!.$1 - segment.spec.originCol,
+              solidHoverCell!.$2 - segment.spec.originRow,
+            );
+      if (hoverLocal != null) {
+        final (int hc, int hr) = hoverLocal;
         final Offset hover = Offset(hc * scale, hr * scale);
         final Offset last = Offset(
           solidDraft.last.$1 * scale,
@@ -673,4 +821,394 @@ class _MapPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _MapPainter oldDelegate) => true;
+}
+
+
+/// 多段合成：每段用原来的单段画笔按自己的 origin 平移绘制。
+class _WorldPainter extends CustomPainter {
+  _WorldPainter({
+    required this.world,
+    required this.terrain,
+    required this.scale,
+    required this.offset,
+    required this.background,
+    required this.grid,
+    required this.border,
+    required this.accent,
+    required this.selectedSegment,
+    required this.level,
+    required this.selectedPlane,
+    required this.selectedLinePortal,
+    required this.linePickStart,
+    required this.propTypes,
+    required this.worldStartCol,
+    required this.worldStartRow,
+    required this.solidDraft,
+    required this.solidHoverCell,
+    required this.marquee,
+    required this.selectedSolid,
+    required this.accentColor,
+  });
+
+  final World world;
+  final TerrainSet terrain;
+  final double scale;
+  final Offset offset;
+  final Color background;
+  final Color grid;
+  final Color border;
+  final Color accent;
+  final int selectedSegment;
+  final int level;
+  final int selectedPlane;
+  final int selectedLinePortal;
+  final (int, int)? linePickStart;
+  final List<PropType> propTypes;
+  final int? worldStartCol;
+  final int? worldStartRow;
+  final List<(int, int)> solidDraft;
+  final (int, int)? solidHoverCell;
+  final Rect? marquee;
+  final int selectedSolid;
+  final Color accentColor;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.drawRect(Offset.zero & size, Paint()..color = background);
+
+    // 按 z 从小到大绘制：-1 在下，1 在上。
+    final List<(Segment, int)> ordered = <(Segment, int)>[
+      for (int i = 0; i < world.segments.length; i++)
+        (world.segments[i], i),
+    ]..sort((a, b) => a.$1.spec.originZ.compareTo(b.$1.spec.originZ));
+
+    for (final (Segment seg, int i) in ordered) {
+      if (seg.spec.originZ == level) {
+        _paintSegment(canvas, size, seg, i == selectedSegment);
+      } else {
+        canvas.saveLayer(
+          Offset.zero & size,
+          Paint()..color = const Color(0x33FFFFFF),
+        );
+        _paintSegment(canvas, size, seg, false);
+        canvas.restore();
+      }
+    }
+
+    canvas.save();
+    canvas.translate(offset.dx, offset.dy);
+    _paintLinePortals(canvas);
+    _paintPortalLinks(canvas);
+    _paintLineDraft(canvas);
+    canvas.restore();
+
+    final Rect? box = marquee;
+    if (box != null) {
+      canvas.drawRect(
+        box,
+        Paint()..color = accentColor.withValues(alpha: 0.15),
+      );
+      canvas.drawRect(
+        box,
+        Paint()
+          ..color = accentColor
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1,
+      );
+    }
+  }
+
+  void _paintSegment(Canvas canvas, Size size, Segment seg, bool selected) {
+    _MapPainter(
+      segment: seg,
+      terrain: terrain,
+      scale: scale,
+      offset: offset +
+          Offset(seg.spec.originCol * scale, seg.spec.originRow * scale),
+      background: background,
+      grid: grid,
+      border: border,
+      accent: accent,
+      highlight: null,
+      placedProps: parsePlacedProps(seg.instructions),
+      propTypes: propTypes,
+      placedObjects: parsePlacedObjects(seg.instructions),
+      worldStartCol: worldStartCol,
+      worldStartRow: worldStartRow,
+      solids: parseSolids(seg.instructions),
+      solidDraft: selected ? solidDraft : const <(int, int)>[],
+      solidHoverCell: selected ? solidHoverCell : null,
+      selectedSolid: selected ? selectedSolid : -1,
+      accentColor: accentColor,
+      drawBackground: false,
+    ).paint(canvas, size);
+  }
+
+  void _paintLineDraft(Canvas canvas) {
+    final (int, int)? start = linePickStart;
+    final (int, int)? hover = solidHoverCell;
+    if (start == null || hover == null) return;
+    if (selectedSegment < 0 || selectedSegment >= world.segments.length) return;
+    final Segment seg = world.segments[selectedSegment];
+    final int sc = seg.spec.originCol + start.$1;
+    final int sr = seg.spec.originRow + start.$2;
+    final int hc = hover.$1;
+    final int hr = hover.$2;
+    final int dc = hc - sc;
+    final int dr = hr - sr;
+    final int x1;
+    final int y1;
+    final int x2;
+    final int y2;
+    if (dc.abs() >= dr.abs()) {
+      x1 = sc < hc ? sc : hc;
+      y1 = sr;
+      x2 = sc > hc ? sc : hc;
+      y2 = sr;
+    } else {
+      x1 = sc;
+      y1 = sr < hr ? sr : hr;
+      x2 = sc;
+      y2 = sr > hr ? sr : hr;
+    }
+    final bool valid = x2 <= seg.spec.originCol + seg.width &&
+        y2 <= seg.spec.originRow + seg.height &&
+        (x2 != x1 || y2 != y1);
+    final Offset a = Offset(x1 * scale, y1 * scale);
+    final Offset b = Offset(x2 * scale, y2 * scale);
+    _drawDashed(
+      canvas,
+      a,
+      b,
+      valid
+          ? const Color(0xFFFFFFFF).withValues(alpha: 0.6)
+          : const Color(0xFFD96C6C),
+    );
+  }
+
+  void _paintLinePortals(Canvas canvas) {
+    for (int i = 0; i < world.segments.length; i++) {
+      final Segment seg = world.segments[i];
+      final List<LinePortal> portals = parseLinePortals(seg.instructions);
+      for (int j = 0; j < portals.length; j++) {
+        final LinePortal portal = portals[j];
+        final bool selected = i == selectedSegment && j == selectedLinePortal;
+        final double x1 = (seg.spec.originCol + portal.x) * scale;
+        final double y1 = (seg.spec.originRow + portal.y) * scale;
+        final double x2 = (seg.spec.originCol + portal.endX) * scale;
+        final double y2 = (seg.spec.originRow + portal.endY) * scale;
+        canvas.drawLine(
+          Offset(x1, y1),
+          Offset(x2, y2),
+          Paint()
+            ..color = selected
+                ? const Color(0xFFFFFFFF)
+                : const Color(0xFF8ECAE6)
+            ..strokeWidth = selected ? 3 : 2,
+        );
+      }
+    }
+  }
+
+  (LinePortal, Segment)? _findPortal(String ref) {
+    final int slash = ref.indexOf('/');
+    if (slash <= 0) return null;
+    final String segId = ref.substring(0, slash);
+    final String portalId = ref.substring(slash + 1);
+    for (final Segment seg in world.segments) {
+      if (seg.spec.id != segId) continue;
+      for (final LinePortal p in parseLinePortals(seg.instructions)) {
+        if (p.id == portalId) return (p, seg);
+      }
+    }
+    return null;
+  }
+
+  Offset _portalMid(LinePortal p, Segment seg) {
+    return Offset(
+      (seg.spec.originCol + (p.x + p.endX) / 2) * scale,
+      (seg.spec.originRow + (p.y + p.endY) / 2) * scale,
+    );
+  }
+
+  /// 起点侧：A 面 = 左/上，B 面 = 右/下。
+  Offset _portalFace(LinePortal p, Segment seg, bool aFace) {
+    final double x = p.horizontal
+        ? (seg.spec.originCol + (aFace ? p.x : p.endX)) * scale
+        : (seg.spec.originCol + p.x) * scale;
+    final double y = p.horizontal
+        ? (seg.spec.originRow + p.y) * scale
+        : (seg.spec.originRow + (aFace ? p.y : p.endY)) * scale;
+    return Offset(x, y);
+  }
+
+  /// 终点侧：A 面 = 右/下，B 面 = 左/上。
+  Offset _portalEndFace(LinePortal p, Segment seg, bool aFace) {
+    final double x = p.horizontal
+        ? (seg.spec.originCol + (aFace ? p.endX : p.x)) * scale
+        : (seg.spec.originCol + p.x) * scale;
+    final double y = p.horizontal
+        ? (seg.spec.originRow + p.y) * scale
+        : (seg.spec.originRow + (aFace ? p.endY : p.y)) * scale;
+    return Offset(x, y);
+  }
+
+  void _paintPortalLinks(Canvas canvas) {
+    for (final dynamic raw in (world.raw['portal_links'] as List? ?? const [])) {
+      if (raw is! Map) continue;
+      final String? from = raw['from']?.toString();
+      final String? to = raw['to']?.toString();
+      if (from == null || to == null) continue;
+      final (LinePortal, Segment)? a = _findPortal(from);
+      final (LinePortal, Segment)? b = _findPortal(to);
+      if (a == null || b == null) continue;
+      final String face = raw['face']?.toString() ?? 'A';
+      final List<bool> sides = switch (face) {
+        'B' => const [false],
+        'both' => const [true, false],
+        _ => const [true],
+      };
+      for (final bool aSide in sides) {
+        final Offset from = _portalFace(a.$1, a.$2, aSide);
+        final Offset to = _portalEndFace(b.$1, b.$2, !aSide);
+        final Color blue = const Color(0xFF6FA8DC).withValues(alpha: 0.7);
+        final Color yellow = const Color(0xFFDCC06E).withValues(alpha: 0.7);
+        _drawDashedGradient(canvas, from, to, blue, yellow);
+        final Offset d = to - from;
+        if (d.distance > 20) {
+          final Offset mid = (from + to) / 2;
+          final Offset u = d / d.distance;
+          _drawArrowHead(
+            canvas,
+            mid - u * 20,
+            mid,
+            Color.lerp(blue, yellow, 0.5)!,
+          );
+        }
+        _drawFaceArrow(canvas, a.$1, a.$2, aSide, blue);
+        _drawExitFaceArrow(
+          canvas,
+          b.$1,
+          b.$2,
+          !aSide,
+          const Color(0xFFDCC06E).withValues(alpha: 0.7),
+        );
+      }
+    }
+  }
+
+  /// 起点箭头：A 面在左/上端点外侧，B 面在右/下端点外侧，箭头指向端点。
+  void _drawFaceArrow(
+    Canvas canvas,
+    LinePortal p,
+    Segment seg,
+    bool aFace,
+    Color color,
+  ) {
+    final Offset tip = _portalFace(p, seg, aFace);
+    const double gap = 20;
+    final Offset from = p.horizontal
+        ? tip + Offset(0, aFace ? -gap : gap)
+        : tip + Offset(aFace ? -gap : gap, 0);
+    canvas.drawLine(
+      from,
+      tip,
+      Paint()
+        ..color = color
+        ..strokeWidth = 2,
+    );
+    _drawArrowHead(canvas, from, tip, color);
+  }
+
+  /// 出口箭头：起点箭头的反面，指向传送门外面。
+  void _drawExitFaceArrow(
+    Canvas canvas,
+    LinePortal p,
+    Segment seg,
+    bool aFace,
+    Color color,
+  ) {
+    final Offset tip = _portalEndFace(p, seg, aFace);
+    const double gap = 20;
+    final Offset out = p.horizontal
+        ? Offset(0, aFace ? -1 : 1)
+        : Offset(aFace ? -1 : 1, 0);
+    final Offset start = tip;
+    final Offset end = tip + out * gap;
+    canvas.drawLine(
+      start,
+      end,
+      Paint()
+        ..color = color
+        ..strokeWidth = 2,
+    );
+    _drawArrowHead(canvas, start, end, color);
+  }
+
+  void _drawArrowHead(Canvas canvas, Offset from, Offset to, Color color) {
+    final Offset d = to - from;
+    final double len = d.distance;
+    if (len < 10) return;
+    final Offset u = d / len;
+    final Offset tip = to - u * 2;
+    const double size = 8;
+    final Offset left = tip -
+        u * size +
+        Offset(-u.dy, u.dx) * (size * 0.55);
+    final Offset right = tip -
+        u * size -
+        Offset(-u.dy, u.dx) * (size * 0.55);
+    final Paint stroke = Paint()
+      ..color = color
+      ..strokeWidth = 2
+      ..style = PaintingStyle.stroke;
+    canvas.drawLine(tip, left, stroke);
+    canvas.drawLine(tip, right, stroke);
+  }
+
+  void _paintPlaneCross(Canvas canvas) {
+    for (int i = 0; i < world.portalPlanes.length; i++) {
+      final PortalPlane plane = world.portalPlanes[i];
+      final bool selected = i == selectedPlane;
+      final bool horizontal = plane.axis == 'x';
+      final Offset a = horizontal
+          ? Offset(plane.at * scale, plane.from * scale)
+          : Offset(plane.from * scale, plane.at * scale);
+      final Offset b = horizontal
+          ? Offset(plane.at * scale, plane.to * scale)
+          : Offset(plane.to * scale, plane.at * scale);
+      final Offset delta = Offset(plane.dx * scale, plane.dy * scale);
+      final Offset a2 = a + delta;
+      final Offset b2 = b + delta;
+
+      const Color white = Color(0xFFFFFFFF);
+      final Paint solid = Paint()
+        ..color = white
+        ..strokeWidth = selected ? 3 : 2;
+
+      canvas.drawLine(a, b, solid);
+      canvas.drawLine(a2, b2, solid);
+      _drawDashed(canvas, a, a2, white.withValues(alpha: 0.3));
+      _drawDashed(canvas, b, b2, white.withValues(alpha: 0.3));
+
+      final Offset mid = Offset((a2.dx + b2.dx) / 2, (a2.dy + b2.dy) / 2);
+      final double sign = plane.direction == '+' ? 1 : -1;
+      const double s6 = 6;
+      final Path arrow = Path();
+      if (horizontal) {
+        arrow.moveTo(mid.dx + sign * s6, mid.dy);
+        arrow.lineTo(mid.dx - sign * s6, mid.dy - s6);
+        arrow.lineTo(mid.dx - sign * s6, mid.dy + s6);
+      } else {
+        arrow.moveTo(mid.dx, mid.dy + sign * s6);
+        arrow.lineTo(mid.dx - s6, mid.dy - s6);
+        arrow.lineTo(mid.dx + s6, mid.dy - s6);
+      }
+      arrow.close();
+      canvas.drawPath(arrow, Paint()..color = white);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _WorldPainter old) => true;
 }

@@ -10,6 +10,7 @@ import '../models/obj.dart';
 import '../models/prop.dart';
 import '../models/solid.dart';
 import '../models/pad.dart';
+import '../models/line_portal.dart';
 import '../models/terrain.dart';
 import '../models/world.dart';
 
@@ -44,6 +45,7 @@ class EditorState extends ChangeNotifier {
   List<String> worlds = [];
   World? world;
   int selectedSegment = 0;
+  int selectedLevel = 0;
   String selectedCode = '.';
   List<String> errors = [];
   String? notice;
@@ -63,6 +65,401 @@ class EditorState extends ChangeNotifier {
   int selectedPlane = -1;
   bool pickPlane = false;
   int? _pickStart;
+
+  bool linePortalPick = false;
+  int selectedLinePortal = -1;
+  (int, int)? _linePickStart;
+  int? _linePickSegment;
+
+  List<LinePortal> get linePortals {
+    final s = segment;
+    if (s == null) return const <LinePortal>[];
+    return parseLinePortals(s.instructions);
+  }
+
+  void toggleLinePortalPick() {
+    linePortalPick = !linePortalPick;
+    _linePickStart = null;
+    _linePickSegment = null;
+    if (linePortalPick) {
+      startPick = false;
+      solidPick = false;
+      padPick = false;
+    }
+    notifyListeners();
+  }
+
+  void pickLinePortalCell(int col, int row) {
+    final s = segment;
+    if (s == null || !linePortalPick) return;
+    if (_linePickStart == null) {
+      _linePickStart = (col, row);
+      _linePickSegment = selectedSegment;
+      notice = '再点另一端';
+      notifyListeners();
+      return;
+    }
+    final (int c0, int r0) = _linePickStart!;
+    final int dc = col - c0;
+    final int dr = row - r0;
+    String dir;
+    int sx;
+    int sy;
+    int length;
+    if (dc.abs() >= dr.abs()) {
+      // 向右
+      dir = 'right';
+      sx = c0 < col ? c0 : col;
+      sy = r0;
+      length = dc.abs();
+    } else {
+      // 向下
+      dir = 'down';
+      sx = c0;
+      sy = r0 < row ? r0 : row;
+      length = dr.abs();
+    }
+    final String? err = linePortalError(dir, sx, sy, length, s.width, s.height);
+    if (err != null) {
+      setError(err);
+      return;
+    }
+    final String id = _nextLinePortalId(s);
+    final String line = linePortalInstruction(id, dir, sx, sy, length);
+    s.instructions.add(line);
+    _push(_Action(
+      label: '加传送门',
+      undo: () => s.instructions.remove(line),
+      redo: () => s.instructions.add(line),
+    ));
+    _linePickStart = null;
+    _linePickSegment = null;
+    linePortalPick = false;
+    selectedLinePortal = linePortals.length - 1;
+    notice = '已添加传送门';
+    notifyListeners();
+  }
+
+  String _nextLinePortalId(Segment s) {
+    final ids = parseLinePortals(s.instructions).map((p) => p.id).toSet();
+    int n = 1;
+    while (ids.contains('lp$n')) {
+      n++;
+    }
+    return 'lp$n';
+  }
+
+  (int, int)? get linePickStart => _linePickStart;
+
+  void pickLinePortalWorld(int col, int row) {
+    final int i = segmentIndexAtWorld(col, row);
+    if (i < 0) return;
+    // 传送门属于段，画到一半不能跑到别的段。
+    if (_linePickStart != null && i != _linePickSegment) {
+      setError('传送门不能跨段');
+      return;
+    }
+    selectedSegment = i;
+    final Segment s = segment!;
+    pickLinePortalCell(col - s.spec.originCol, row - s.spec.originRow);
+  }
+
+  List<({String segment, LinePortal portal})> get allLinePortals {
+    final w = world;
+    if (w == null) return const <({String segment, LinePortal portal})>[];
+    final out = <({String segment, LinePortal portal})>[];
+    for (final s in w.segments) {
+      for (final p in parseLinePortals(s.instructions)) {
+        out.add((segment: s.spec.id, portal: p));
+      }
+    }
+    return out;
+  }
+
+  List<PortalLink> get portalLinks => parsePortalLinks(world?.raw['portal_links']);
+
+  String? _linkError(String from, String to) {
+    if (from == to) return '不能连自己';
+    LinePortal? find(String ref) {
+      final int slash = ref.indexOf('/');
+      if (slash <= 0) return null;
+      final String segId = ref.substring(0, slash);
+      final String portalId = ref.substring(slash + 1);
+      final World? w = world;
+      if (w == null) return null;
+      for (final s in w.segments) {
+        if (s.spec.id != segId) continue;
+        for (final p in parseLinePortals(s.instructions)) {
+          if (p.id == portalId) return p;
+        }
+      }
+      return null;
+    }
+
+    final LinePortal? a = find(from);
+    final LinePortal? b = find(to);
+    if (a == null || b == null) return '找不到传送门';
+    if (a.dir != b.dir) return '两条线方向不同';
+    if (a.length != b.length) return '两条线长度不同';
+    return null;
+  }
+
+  void addPortalLink(String from, String to, {String face = 'A'}) {
+    final String? err = _linkError(from, to);
+    if (err != null) {
+      setError(err);
+      return;
+    }
+    final before = _rawList('portal_links');
+    final after = _rawList('portal_links')
+      ..add(<String, dynamic>{'from': from, 'to': to, 'face': face});
+    _setRawList('portal_links', after);
+    _push(_Action(
+      label: '加传送门连接',
+      undo: () => _setRawList('portal_links', before),
+      redo: () => _setRawList('portal_links', after),
+    ));
+    notifyListeners();
+  }
+
+  void removePortalLink(int index) {
+    final list = portalLinks;
+    if (index < 0 || index >= list.length) return;
+    final before = _rawList('portal_links');
+    final after = _rawList('portal_links')..removeAt(index);
+    _setRawList('portal_links', after);
+    _push(_Action(
+      label: '删传送门连接',
+      undo: () => _setRawList('portal_links', before),
+      redo: () => _setRawList('portal_links', after),
+    ));
+    notifyListeners();
+  }
+
+  (LinePortal, Segment)? _findPortalRef(String ref) {
+    final int slash = ref.indexOf('/');
+    if (slash <= 0) return null;
+    final String segId = ref.substring(0, slash);
+    final String portalId = ref.substring(slash + 1);
+    final World? w = world;
+    if (w == null) return null;
+    for (final Segment seg in w.segments) {
+      if (seg.spec.id != segId) continue;
+      for (final LinePortal p in parseLinePortals(seg.instructions)) {
+        if (p.id == portalId) return (p, seg);
+      }
+    }
+    return null;
+  }
+
+  void updateLinePortal(
+    int index, {
+    String? dir,
+    int? x,
+    int? y,
+    int? length,
+  }) {
+    final list = linePortals;
+    if (index < 0 || index >= list.length) return;
+    final s = segment;
+    if (s == null) return;
+    final LinePortal p = list[index];
+    final String nd = dir ?? p.dir;
+    final int nx = x ?? p.x;
+    final int ny = y ?? p.y;
+    final int nl = length ?? p.length;
+    final String? err = linePortalError(nd, nx, ny, nl, s.width, s.height);
+    if (err != null) {
+      setError(err);
+      return;
+    }
+
+    // 收集联动对象：所有直接连接到的传送门。
+    final String selfRef = '${s.spec.id}/${p.id}';
+    final Set<String> refs = <String>{selfRef};
+    for (final link in portalLinks) {
+      if (link.from == selfRef) refs.add(link.to);
+      if (link.to == selfRef) refs.add(link.from);
+    }
+
+    final List<({Segment seg, int index, String before, String after})> edits = [];
+    for (final String ref in refs) {
+      final (LinePortal, Segment)? found = _findPortalRef(ref);
+      if (found == null) continue;
+      final LinePortal other = found.$1;
+      final Segment seg = found.$2;
+      final bool isSelf = ref == selfRef;
+      final int ox = isSelf ? nx : other.x;
+      final int oy = isSelf ? ny : other.y;
+      final String? e2 = linePortalError(nd, ox, oy, nl, seg.width, seg.height);
+      if (e2 != null) {
+        setError('联动失败：${seg.spec.id}/${other.id} $e2');
+        return;
+      }
+      edits.add((
+        seg: seg,
+        index: other.instructionIndex,
+        before: seg.instructions[other.instructionIndex],
+        after: linePortalInstruction(other.id, nd, ox, oy, nl),
+      ));
+    }
+
+    for (final e in edits) {
+      e.seg.instructions[e.index] = e.after;
+    }
+    _push(_Action(
+      label: '改传送门',
+      undo: () {
+        for (final e in edits) {
+          e.seg.instructions[e.index] = e.before;
+        }
+        notifyListeners();
+      },
+      redo: () {
+        for (final e in edits) {
+          e.seg.instructions[e.index] = e.after;
+        }
+        notifyListeners();
+      },
+    ));
+    notifyListeners();
+  }
+
+  void renameLinePortal(int index, String value) {
+    final list = linePortals;
+    if (index < 0 || index >= list.length) return;
+    final s = segment;
+    if (s == null) return;
+    final LinePortal p = list[index];
+    final String name = value.trim();
+    if (name.isEmpty || name == p.id) return;
+    if (!RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(name)) {
+      setError('名字只能用字母、数字、下划线、短横线');
+      return;
+    }
+    if (list.any((e) => e.id == name)) {
+      setError('这个段里已经有同名传送门');
+      return;
+    }
+    final String oldRef = '${s.spec.id}/${p.id}';
+    final String newRef = '${s.spec.id}/$name';
+    final String beforeLine = s.instructions[p.instructionIndex];
+    final String afterLine =
+        linePortalInstruction(name, p.dir, p.x, p.y, p.length);
+    final beforeLinks = _rawList('portal_links');
+    final afterLinks = _rawList('portal_links')
+      ..replaceRange(0, 0, const <Map<String, dynamic>>[]);
+    for (final l in afterLinks) {
+      if (l['from'] == oldRef) l['from'] = newRef;
+      if (l['to'] == oldRef) l['to'] = newRef;
+    }
+    s.instructions[p.instructionIndex] = afterLine;
+    _setRawList('portal_links', afterLinks);
+    _push(_Action(
+      label: '传送门改名',
+      undo: () {
+        s.instructions[p.instructionIndex] = beforeLine;
+        _setRawList('portal_links', beforeLinks);
+        notifyListeners();
+      },
+      redo: () {
+        s.instructions[p.instructionIndex] = afterLine;
+        _setRawList('portal_links', afterLinks);
+        notifyListeners();
+      },
+    ));
+    notifyListeners();
+  }
+
+  void eraseLinePortalWorld(int col, int row) {
+    final World? w = world;
+    if (w == null) return;
+    int bestSeg = -1;
+    int bestIndex = -1;
+    double bestDist = 1.0;
+    for (int i = 0; i < w.segments.length; i++) {
+      final Segment seg = w.segments[i];
+      if (seg.spec.originZ != selectedLevel) continue;
+      final List<LinePortal> list = parseLinePortals(seg.instructions);
+      for (int j = 0; j < list.length; j++) {
+        final LinePortal p = list[j];
+        final double x1 = (seg.spec.originCol + p.x).toDouble();
+        final double y1 = (seg.spec.originRow + p.y).toDouble();
+        final double x2 = seg.spec.originCol + p.endX.toDouble();
+        final double y2 = seg.spec.originRow + p.endY.toDouble();
+        final double d = _pointSegmentDistance(
+          col + 0.5,
+          row + 0.5,
+          x1,
+          y1,
+          x2,
+          y2,
+        );
+        if (d < bestDist) {
+          bestDist = d;
+          bestSeg = i;
+          bestIndex = j;
+        }
+      }
+    }
+    if (bestSeg < 0) return;
+    selectedSegment = bestSeg;
+    removeLinePortal(bestIndex);
+  }
+
+  static double _pointSegmentDistance(
+    double px,
+    double py,
+    double x1,
+    double y1,
+    double x2,
+    double y2,
+  ) {
+    final double dx = x2 - x1;
+    final double dy = y2 - y1;
+    final double len2 = dx * dx + dy * dy;
+    if (len2 == 0) {
+      final double ex = px - x1;
+      final double ey = py - y1;
+      return (ex * ex + ey * ey);
+    }
+    double t = ((px - x1) * dx + (py - y1) * dy) / len2;
+    t = t.clamp(0.0, 1.0);
+    final double ex = px - (x1 + t * dx);
+    final double ey = py - (y1 + t * dy);
+    return (ex * ex + ey * ey);
+  }
+
+  void removeLinePortal(int index) {
+    final list = linePortals;
+    if (index < 0 || index >= list.length) return;
+    final s = segment;
+    if (s == null) return;
+    final LinePortal portal = list[index];
+    final String ref = '${s.spec.id}/${portal.id}';
+    final line = s.instructions[portal.instructionIndex];
+    final beforeLinks = _rawList('portal_links');
+    final afterLinks = _rawList('portal_links')
+      ..removeWhere((l) => l['from'] == ref || l['to'] == ref);
+
+    s.instructions.remove(line);
+    _setRawList('portal_links', afterLinks);
+    _push(_Action(
+      label: '删传送门',
+      undo: () {
+        s.instructions.add(line);
+        _setRawList('portal_links', beforeLinks);
+        notifyListeners();
+      },
+      redo: () {
+        s.instructions.remove(line);
+        _setRawList('portal_links', afterLinks);
+        notifyListeners();
+      },
+    ));
+    selectedLinePortal = -1;
+    notifyListeners();
+  }
 
   bool startPick = false;
   bool padPick = false;
@@ -96,6 +493,7 @@ class EditorState extends ChangeNotifier {
   final List<_Action> _undo = [];
   final List<_Action> _redo = [];
   final List<_CellChange> _stroke = [];
+  final List<_Action> _strokeOps = <_Action>[];
   bool _inStroke = false;
 
   bool get canUndo => _undo.isNotEmpty;
@@ -394,16 +792,22 @@ class EditorState extends ChangeNotifier {
       }
     }
 
-    if (w.dirPath.isNotEmpty) {
-      final file = File('${w.dirPath}/${s.spec.file}');
-      if (file.existsSync()) file.deleteSync();
-    }
-
     final index = selectedSegment;
     w.segments.removeAt(index);
     if (selectedSegment >= w.segments.length) {
       selectedSegment = w.segments.length - 1;
     }
+    _push(_Action(
+      label: '删段',
+      undo: () {
+        w.segments.insert(index, s);
+        notifyListeners();
+      },
+      redo: () {
+        w.segments.remove(s);
+        notifyListeners();
+      },
+    ));
     dirty = true;
     notice = '已删除段 ${s.spec.id}';
     notifyListeners();
@@ -441,7 +845,11 @@ class EditorState extends ChangeNotifier {
     notifyListeners();
   }
 
-  void toggleObjectAt(int col, int row) {
+  void toggleObjectAt(int col, int row) => _objectAt(col, row, 0);
+  void placeObjectAt(int col, int row) => _objectAt(col, row, 1);
+  void eraseObjectAt(int col, int row) => _objectAt(col, row, 2);
+
+  void _objectAt(int col, int row, int mode) {
     final s = segment;
     final id = selectedObjectId;
     if (s == null || id == null) return;
@@ -451,6 +859,7 @@ class EditorState extends ChangeNotifier {
         .where((o) => o.col == col && o.row == row && o.id == id)
         .toList();
     if (existing.isNotEmpty) {
+      if (mode == 1) return;
       final o = existing.first;
       final line = s.instructions.removeAt(o.instructionIndex);
       _push(_Action(
@@ -465,6 +874,7 @@ class EditorState extends ChangeNotifier {
       return;
     }
 
+    if (mode == 2) return;
     final line = '; spawn=$id,$col,$row';
     final index = s.instructions.length;
     s.instructions.add(line);
@@ -482,7 +892,11 @@ class EditorState extends ChangeNotifier {
   }
 
   /// 点格子：已有同种道具就删掉，没有就放下。
-  void togglePropAt(int col, int row) {
+  void togglePropAt(int col, int row) => _propAt(col, row, 0);
+  void placePropAt(int col, int row) => _propAt(col, row, 1);
+  void erasePropAt(int col, int row) => _propAt(col, row, 2);
+
+  void _propAt(int col, int row, int mode) {
     final s = segment;
     final id = selectedPropId;
     if (s == null || id == null) return;
@@ -492,6 +906,7 @@ class EditorState extends ChangeNotifier {
         .where((p) => p.col == col && p.row == row && p.id == id)
         .toList();
     if (existing.isNotEmpty) {
+      if (mode == 1) return;
       final p = existing.first;
       final line = s.instructions.removeAt(p.instructionIndex);
       _push(_Action(
@@ -506,6 +921,7 @@ class EditorState extends ChangeNotifier {
       return;
     }
 
+    if (mode == 2) return;
     final line = '; prop=$id,$col,$row';
     final index = s.instructions.length;
     s.instructions.add(line);
@@ -529,6 +945,10 @@ class EditorState extends ChangeNotifier {
 
   void _push(_Action action) {
     dirty = true;
+    if (_inStroke) {
+      _strokeOps.add(action);
+      return;
+    }
     _undo.add(action);
     _redo.clear();
     if (action.tag != 'rename:$_renameIndex') {
@@ -541,18 +961,36 @@ class EditorState extends ChangeNotifier {
 
   void beginStroke() {
     _stroke.clear();
+    _strokeOps.clear();
     _inStroke = true;
   }
 
   void endStroke() {
     _inStroke = false;
-    if (_stroke.isEmpty) return;
+    if (_stroke.isEmpty && _strokeOps.isEmpty) return;
     final changes = List<_CellChange>.from(_stroke);
+    final ops = List<_Action>.from(_strokeOps);
     _stroke.clear();
+    _strokeOps.clear();
+    final String label = changes.isNotEmpty && ops.isEmpty
+        ? '刷地形 ${changes.length} 格'
+        : ops.isNotEmpty && changes.isEmpty
+            ? '${ops.first.label} ${ops.length} 处'
+            : '一次笔画';
     _push(_Action(
-      label: '刷地形 ${changes.length} 格',
-      undo: () => _applyChanges(changes, reverse: true),
-      redo: () => _applyChanges(changes, reverse: false),
+      label: label,
+      undo: () {
+        _applyChanges(changes, reverse: true);
+        for (final a in ops.reversed) {
+          a.undo();
+        }
+      },
+      redo: () {
+        _applyChanges(changes, reverse: false);
+        for (final a in ops) {
+          a.redo();
+        }
+      },
     ));
     notifyListeners();
   }
@@ -568,16 +1006,20 @@ class EditorState extends ChangeNotifier {
     }
   }
 
-  void paint(int col, int row) {
+  void paint(int col, int row) => _paintCode(col, row, selectedCode);
+
+  void erase(int col, int row) => _paintCode(col, row, '.');
+
+  void _paintCode(int col, int row, String code) {
     final s = segment;
     if (s == null) return;
     if (col < 0 || row < 0 || col >= s.width || row >= s.height) return;
 
     final before = s.charAt(col, row);
-    if (before == selectedCode) return;
-    s.setChar(col, row, selectedCode);
+    if (before == code) return;
+    s.setChar(col, row, code);
 
-    final change = _CellChange(selectedSegment, col, row, before, selectedCode);
+    final change = _CellChange(selectedSegment, col, row, before, code);
     if (_inStroke) {
       _stroke.add(change);
     } else {
@@ -588,7 +1030,7 @@ class EditorState extends ChangeNotifier {
           notifyListeners();
         },
         redo: () {
-          s.setChar(col, row, selectedCode);
+          s.setChar(col, row, code);
           notifyListeners();
         },
       ));
@@ -640,9 +1082,9 @@ class EditorState extends ChangeNotifier {
     if (w == null || s == null) return;
     final plane = PortalPlane(
       axis: 'x',
-      at: s.width,
-      from: 0,
-      to: s.height,
+      at: w.maxCol,
+      from: w.minRow,
+      to: w.maxRow,
       direction: '+',
       dx: 0,
       dy: 0,
@@ -650,7 +1092,7 @@ class EditorState extends ChangeNotifier {
     w.portalPlanes.add(plane);
     selectedPlane = w.portalPlanes.length - 1;
     _push(_Action(
-      label: '新建传送格',
+      label: '新建传送门',
       undo: () {
         w.portalPlanes.remove(plane);
         if (selectedPlane >= w.portalPlanes.length) {
@@ -753,6 +1195,179 @@ class EditorState extends ChangeNotifier {
     notifyListeners();
   }
 
+  List<int> get levels {
+    final w = world;
+    if (w == null) return const <int>[];
+    final set = <int>{for (final s in w.segments) s.spec.originZ};
+    final list = set.toList()..sort();
+    return list;
+  }
+
+  void setLevel(int z) {
+    selectedLevel = z;
+    final w = world;
+    if (w != null) {
+      final int i = w.segments.indexWhere((s) => s.spec.originZ == z);
+      selectedSegment = i < 0 ? 0 : i;
+    }
+    notifyListeners();
+  }
+
+  Segment? segmentAtWorld(int col, int row) {
+    final w = world;
+    if (w == null) return null;
+    for (final s in w.segments) {
+      if (s.spec.originZ != selectedLevel) continue;
+      if (col >= s.spec.originCol &&
+          col < s.spec.originCol + s.width &&
+          row >= s.spec.originRow &&
+          row < s.spec.originRow + s.height) {
+        return s;
+      }
+    }
+    return null;
+  }
+
+  int segmentIndexAtWorld(int col, int row) {
+    final w = world;
+    if (w == null) return -1;
+    for (int i = 0; i < w.segments.length; i++) {
+      final s = w.segments[i];
+      if (s.spec.originZ != selectedLevel) continue;
+      if (col >= s.spec.originCol &&
+          col < s.spec.originCol + s.width &&
+          row >= s.spec.originRow &&
+          row < s.spec.originRow + s.height) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  bool _activateWorldCell(int col, int row) {
+    final int i = segmentIndexAtWorld(col, row);
+    if (i < 0) return false;
+    selectedSegment = i;
+    return true;
+  }
+
+  void paintWorld(int col, int row) {
+    if (!_activateWorldCell(col, row)) return;
+    final Segment s = segment!;
+    paint(col - s.spec.originCol, row - s.spec.originRow);
+  }
+
+  void eraseWorld(int col, int row) {
+    if (!_activateWorldCell(col, row)) return;
+    final Segment s = segment!;
+    erase(col - s.spec.originCol, row - s.spec.originRow);
+  }
+
+  void togglePropWorld(int col, int row) {
+    if (!_activateWorldCell(col, row)) return;
+    final Segment s = segment!;
+    togglePropAt(col - s.spec.originCol, row - s.spec.originRow);
+  }
+
+  void placePropWorld(int col, int row) {
+    if (!_activateWorldCell(col, row)) return;
+    final Segment s = segment!;
+    placePropAt(col - s.spec.originCol, row - s.spec.originRow);
+  }
+
+  void erasePropWorld(int col, int row) {
+    if (!_activateWorldCell(col, row)) return;
+    final Segment s = segment!;
+    erasePropAt(col - s.spec.originCol, row - s.spec.originRow);
+  }
+
+  void toggleObjectWorld(int col, int row) {
+    if (!_activateWorldCell(col, row)) return;
+    final Segment s = segment!;
+    toggleObjectAt(col - s.spec.originCol, row - s.spec.originRow);
+  }
+
+  void placeObjectWorld(int col, int row) {
+    if (!_activateWorldCell(col, row)) return;
+    final Segment s = segment!;
+    placeObjectAt(col - s.spec.originCol, row - s.spec.originRow);
+  }
+
+  void eraseObjectWorld(int col, int row) {
+    if (!_activateWorldCell(col, row)) return;
+    final Segment s = segment!;
+    eraseObjectAt(col - s.spec.originCol, row - s.spec.originRow);
+  }
+
+  void pickSolidWorld(int col, int row) {
+    final int i = segmentIndexAtWorld(col, row);
+    if (i < 0) return;
+    if (_solidDraft.isNotEmpty && i != selectedSegment) return;
+    selectedSegment = i;
+    final Segment s = segment!;
+    pickSolidCell(col - s.spec.originCol, row - s.spec.originRow);
+  }
+
+  void selectSolidWorld(int col, int row) {
+    if (!_activateWorldCell(col, row)) return;
+    final Segment s = segment!;
+    selectSolidAtCell(col - s.spec.originCol, row - s.spec.originRow);
+  }
+
+  void addPadWorld(int col, int row) {
+    if (!_activateWorldCell(col, row)) return;
+    final Segment s = segment!;
+    addPadAtCell(col - s.spec.originCol, row - s.spec.originRow);
+  }
+
+  void placePadWorld(int col, int row) {
+    if (!_activateWorldCell(col, row)) return;
+    final Segment s = segment!;
+    placePadAtCell(col - s.spec.originCol, row - s.spec.originRow);
+  }
+
+  void removePadWorld(int col, int row) {
+    final int i = segmentIndexAtWorld(col, row);
+    if (i < 0) return;
+    final Segment s = world!.segments[i];
+    final int lc = col - s.spec.originCol;
+    final int lr = row - s.spec.originRow;
+    final int idx = pads.indexWhere(
+      (p) => p.segment == s.spec.id && p.col == lc && p.row == lr,
+    );
+    if (idx >= 0) removePad(idx);
+  }
+
+  void pickPlaneWorld(int col, int row) {
+    pickCell(col, row);
+  }
+
+  void setStartWorld(int col, int row) {
+    final w = world;
+    if (w == null || !startPick) return;
+    final before = w.raw['start'] == null
+        ? null
+        : Map<String, dynamic>.from(w.raw['start'] as Map);
+    w.raw['start'] = <String, dynamic>{'col': col, 'row': row};
+    _push(_Action(
+      label: '改世界起点',
+      undo: () {
+        if (before == null) {
+          w.raw.remove('start');
+        } else {
+          w.raw['start'] = Map<String, dynamic>.from(before);
+        }
+        notifyListeners();
+      },
+      redo: () {
+        w.raw['start'] = <String, dynamic>{'col': col, 'row': row};
+        notifyListeners();
+      },
+    ));
+    startPick = false;
+    notifyListeners();
+  }
+
   List<Map<String, dynamic>> _rawList(String key) {
     final v = world?.raw[key];
     if (v is! List) return <Map<String, dynamic>>[];
@@ -814,8 +1429,15 @@ class EditorState extends ChangeNotifier {
   }
 
   void addPadAtCell(int col, int row) {
+    if (!padPick) return;
+    _addPadAt(col, row);
+  }
+
+  void placePadAtCell(int col, int row) => _addPadAt(col, row);
+
+  void _addPadAt(int col, int row) {
     final s = segment;
-    if (s == null || !padPick) return;
+    if (s == null) return;
     final id = _nextPadId();
     _editLists('加传送格', (pads, padLinks) {
       pads.add(<String, dynamic>{
@@ -1134,21 +1756,22 @@ class EditorState extends ChangeNotifier {
   }
 
   /// 画布拾取：第一次点确定 at / from，第二次点确定 to。
+  /// 平面坐标是整张世界的坐标，不是段内坐标。
   void pickCell(int col, int row) {
     if (!pickPlane) return;
     final plane = (selectedPlane >= 0 && selectedPlane < planes.length)
         ? planes[selectedPlane]
         : null;
-    final s = segment;
-    if (plane == null || s == null) return;
+    final w = world;
+    if (plane == null || w == null) return;
 
     final horizontal = plane.axis == 'x';
     final at = horizontal
-        ? (col < 0 ? 0 : (col > s.width ? s.width : col))
-        : (row < 0 ? 0 : (row > s.height ? s.height : row));
+        ? col.clamp(w.minCol, w.maxCol)
+        : row.clamp(w.minRow, w.maxRow);
     final along = horizontal
-        ? (row < 0 ? 0 : (row > s.height ? s.height : row))
-        : (col < 0 ? 0 : (col > s.width ? s.width : col));
+        ? row.clamp(w.minRow, w.maxRow)
+        : col.clamp(w.minCol, w.maxCol);
 
     if (_pickStart == null) {
       _pickStart = along;
@@ -1170,32 +1793,37 @@ class EditorState extends ChangeNotifier {
     SegmentSpec spec, {
     int? originCol,
     int? originRow,
+    int? originZ,
     String? repeat,
     int? repeatCount,
   }) {
     final before = (
       originCol: spec.originCol,
       originRow: spec.originRow,
+      originZ: spec.originZ,
       repeat: spec.repeat,
       repeatCount: spec.repeatCount,
     );
 
     spec.originCol = originCol ?? spec.originCol;
     spec.originRow = originRow ?? spec.originRow;
+    spec.originZ = originZ ?? spec.originZ;
     spec.repeat = repeat ?? spec.repeat;
     spec.repeatCount = repeatCount ?? spec.repeatCount;
 
     final after = (
       originCol: spec.originCol,
       originRow: spec.originRow,
+      originZ: spec.originZ,
       repeat: spec.repeat,
       repeatCount: spec.repeatCount,
     );
     if (before == after) return;
 
-    void apply(({int originCol, int originRow, String repeat, int repeatCount}) v) {
+    void apply(({int originCol, int originRow, int originZ, String repeat, int repeatCount}) v) {
       spec.originCol = v.originCol;
       spec.originRow = v.originRow;
+      spec.originZ = v.originZ;
       spec.repeat = v.repeat;
       spec.repeatCount = v.repeatCount;
     }
@@ -1252,19 +1880,7 @@ class EditorState extends ChangeNotifier {
     final target = '$id.seg';
     if (spec.file == target) return;
 
-    final from = File('$rootPath/${w.name}/${spec.file}');
-    final to = File('$rootPath/${w.name}/$target');
-    if (!from.existsSync()) {
-      errors = ['找不到 ${spec.file}'];
-      notifyListeners();
-      return;
-    }
-    if (to.existsSync()) {
-      errors = ['目标文件已存在：$target'];
-      notifyListeners();
-      return;
-    }
-    from.renameSync(to.path);
+    // 只改内存里的引用，文件在保存时统一写入，旧文件在保存时清理。
     spec.file = target;
     dirty = true;
     errors = [];

@@ -6,6 +6,7 @@ import 'package:jo_draftui/jo_draftui.dart';
 
 import '../config.dart';
 import '../models/world.dart';
+import '../models/line_portal.dart';
 import '../state/editor_state.dart';
 import 'map_canvas.dart';
 import 'segment_dialogs.dart';
@@ -36,6 +37,14 @@ class _EditorPageState extends State<EditorPage> {
   String? _linkFrom;
   String? _linkTo;
   bool _linkBidirectional = false;
+  int _prefsTab = 0;
+  final Map<int, int> _toolByTab = <int, int>{}; // 每个页签各自的工具，不落盘
+  int get _currentTool => _toolByTab[_panelTab] ?? 0;
+  String? _portalLinkTo;
+  String _portalLinkFace = 'A';
+  int _selectedPortalLink = -1;
+  final TextEditingController _portalNameCtrl = TextEditingController();
+
 
   static const MethodChannel _windowChannel = MethodChannel('jodraft/window');
 
@@ -82,7 +91,10 @@ class _EditorPageState extends State<EditorPage> {
     return AnimatedBuilder(
       animation: Listenable.merge([state, appSettings]),
       builder: (context, _) {
-        return Focus(
+        final pal = JoTheme.of(context);
+        return ColoredBox(
+          color: pal.bg,
+          child: Focus(
           autofocus: true,
           onKeyEvent: _onKey,
           child: Stack(
@@ -93,14 +105,50 @@ class _EditorPageState extends State<EditorPage> {
                   _toolbar(p),
                   Container(height: 1, color: p.border),
                   Expanded(
-                    child: Row(
-                      children: [
-                        _leftPanel(p),
-                        Container(width: 1, color: p.border),
-                        Expanded(child: _canvas(p)),
-                        Container(width: 1, color: p.border),
-                        _rightPanel(p),
-                      ],
+                    child: LayoutBuilder(
+                      builder: (context, constraints) {
+                        const double canvasMin = 240;
+                        final double total = constraints.maxWidth;
+                        final double leftMax = (total -
+                                appSettings.rightWidth -
+                                canvasMin -
+                                kJoSplitterTotal * 1)
+                            .clamp(160.0, 520.0);
+                        final double rightMax = (total -
+                                appSettings.leftWidth -
+                                canvasMin -
+                                kJoSplitterTotal * 1)
+                            .clamp(240.0, 560.0);
+                        final double leftW = appSettings.leftWidth.clamp(160.0, leftMax);
+                        final double rightW = appSettings.rightWidth.clamp(240.0, rightMax);
+                        return Row(
+                          children: [
+                            _leftPanel(p, leftW),
+                            JoSplitter(
+                              palette: p,
+                              width: leftW,
+                              minWidth: 160,
+                              maxWidth: leftMax,
+                              defaultWidth: 220,
+                              growsRight: true,
+                              onResize: appSettings.setLeftWidth,
+                              onResizeEnd: appSettings.saveLayout,
+                            ),
+                            Expanded(child: _canvas(p)),
+                            JoSplitter(
+                              palette: p,
+                              width: rightW,
+                              minWidth: 240,
+                              maxWidth: rightMax,
+                              defaultWidth: 300,
+                              growsRight: false,
+                              onResize: appSettings.setRightWidth,
+                              onResizeEnd: appSettings.saveLayout,
+                            ),
+                            _rightPanel(p, rightW),
+                          ],
+                        );
+                      },
                     ),
                   ),
                   _statusBar(),
@@ -133,6 +181,7 @@ class _EditorPageState extends State<EditorPage> {
               if (_licensesOpen) _licensesOverlay(p),
             ],
           ),
+        ),
         );
       },
     );
@@ -241,6 +290,17 @@ class _EditorPageState extends State<EditorPage> {
         ]),
         JoMenu('视图', [
           JoMenuItem('校验地图', onTap: state.world == null ? null : state.validate),
+          const JoMenuItem('', divider: true),
+          JoMenuItem(
+            '重置布局',
+            onTap: () {
+              appSettings.setLeftWidth(220);
+              appSettings.setRightWidth(300);
+              appSettings.setLayerHeight(120);
+              appSettings.setPortalListHeight(240);
+              appSettings.saveLayout();
+            },
+          ),
         ]),
         JoMenu('帮助', [
           JoMenuItem('检查更新…', onTap: _checkForUpdates),
@@ -268,6 +328,7 @@ class _EditorPageState extends State<EditorPage> {
             tip: '重做',
             onTap: state.canRedo ? state.redo : null,
           ),
+
           Container(
             width: 1,
             height: 20,
@@ -305,14 +366,46 @@ class _EditorPageState extends State<EditorPage> {
               '${state.world!.name} / ${segment?.spec.id ?? '-'}',
               style: JoTheme.meta(context).copyWith(color: p.secondary),
             ),
+          const Spacer(),
+          JoSegment<int>(
+            key: ValueKey<int>(_panelTab),
+            options: switch (_panelTab) {
+              0 || 1 || 2 => const [
+                  (label: '选择', value: 0),
+                  (label: '笔', value: 1),
+                  (label: '橡皮', value: 2),
+                ],
+              3 => const [
+                  (label: '选择', value: 0),
+                  (label: '新建', value: 1),
+                  (label: '橡皮', value: 2),
+                ],
+              7 => const [
+                  (label: '选择', value: 0),
+                  (label: '放置', value: 1),
+                  (label: '拆除', value: 2),
+                ],
+              _ => const [
+                  (label: '选择', value: 0),
+                ],
+            },
+            value: _currentTool,
+            onChanged: (v) => setState(() {
+              _toolByTab[_panelTab] = v;
+              if (_panelTab == 3 && v == 0 && state.linePortalPick) {
+                state.toggleLinePortalPick();
+              }
+            }),
+          ),
+          const SizedBox(width: JoSpace.s2),
         ],
       ),
     );
   }
 
-  Widget _leftPanel(JoPalette p) {
+  Widget _leftPanel(JoPalette p, double width) {
     return SizedBox(
-      width: 220,
+      width: width,
       child: ColoredBox(
         color: p.surface,
         child: Column(
@@ -361,26 +454,48 @@ class _EditorPageState extends State<EditorPage> {
             ),
             Container(height: 1, color: p.border),
 
-            // —— 段
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                JoSpace.s3,
-                JoSpace.s3,
-                JoSpace.s3,
-                JoSpace.s1,
+            // —— 层
+            SizedBox(
+              height: appSettings.layerHeight.clamp(
+                60.0,
+                (MediaQuery.sizeOf(context).height - 320)
+                    .clamp(60.0, 600.0),
               ),
-              child: Text(
-                '段',
-                style: JoTheme.meta(context).copyWith(
-                  color: p.secondary,
-                  letterSpacing: 1.2,
+              child: JoListSection(
+                title: '层列表',
+                child: ListView(
+                  children: [
+                    for (final int z in state.levels.reversed)
+                      JoListRow(
+                        title: 'z = $z',
+                        subtitle:
+                            '${state.world!.segments.where((s) => s.spec.originZ == z).length} 个段',
+                        selected: z == state.selectedLevel,
+                        onTap: () => state.setLevel(z),
+                      ),
+                  ],
                 ),
               ),
             ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: JoSpace.s2),
-              child: Row(
-                children: [
+            JoSplitter(
+              palette: p,
+              axis: JoSplitterAxis.vertical,
+              colors: [p.surface, p.surface],
+              width: appSettings.layerHeight,
+              minWidth: 60,
+              maxWidth: (MediaQuery.sizeOf(context).height - 320)
+                  .clamp(60.0, 600.0),
+              defaultWidth: 120,
+              growsRight: true,
+              onResize: appSettings.setLayerHeight,
+              onResizeEnd: appSettings.saveLayout,
+            ),
+
+            // —— 段
+            Expanded(
+              child: JoListSection(
+                title: '段列表',
+                actions: [
                   JoButton(
                     text: '新建',
                     bordered: true,
@@ -404,22 +519,27 @@ class _EditorPageState extends State<EditorPage> {
                         : () => setState(() => _delSegOpen = true),
                   ),
                 ],
-              ),
-            ),
-            const SizedBox(height: JoSpace.s2),
-            Container(height: 1, color: p.border),
-            Expanded(
-              child: ListView.builder(
-                itemCount: state.world?.segments.length ?? 0,
-                itemBuilder: (context, index) {
-                  final segment = state.world!.segments[index];
-                  return JoListRow(
-                    title: segment.spec.id,
-                    subtitle: '${segment.width}×${segment.height}',
-                    selected: index == state.selectedSegment,
-                    onTap: () => state.selectSegment(index),
-                  );
-                },
+                child: ListView.builder(
+                  itemCount: state.world == null
+                      ? 0
+                      : state.world!.segments
+                          .where((s) => s.spec.originZ == state.selectedLevel)
+                          .length,
+                  itemBuilder: (context, index) {
+                    final List<Segment> list = state.world!.segments
+                        .where((s) => s.spec.originZ == state.selectedLevel)
+                        .toList(growable: false);
+                    final Segment segment = list[index];
+                    final int globalIndex =
+                        state.world!.segments.indexOf(segment);
+                    return JoListRow(
+                      title: segment.spec.id,
+                      subtitle: '${segment.width}×${segment.height}',
+                      selected: globalIndex == state.selectedSegment,
+                      onTap: () => state.selectSegment(globalIndex),
+                    );
+                  },
+                ),
               ),
             ),
           ],
@@ -440,49 +560,54 @@ class _EditorPageState extends State<EditorPage> {
       );
     }
 
-    PortalPlane? highlight;
-    if (_panelTab == 3 &&
-        state.selectedPlane >= 0 &&
-        state.selectedPlane < state.planes.length) {
-      highlight = state.planes[state.selectedPlane];
-    }
-
     return MapCanvas(
-      segment: segment,
+      world: state.world!,
       terrain: terrain,
+      selectedSegment: state.selectedSegment,
+      level: state.selectedLevel,
       selectedCode: state.selectedCode,
-      onPaint: state.paint,
+      paintEnabled: _panelTab == 0 && _currentTool != 0,
+      onPaint: _currentTool == 2 ? state.eraseWorld : state.paintWorld,
       onStrokeStart: state.beginStroke,
       onStrokeEnd: state.endStroke,
-      highlight: highlight,
+      selectedPlane: state.selectedPlane,
+      linePortalMode: _panelTab == 3 && _currentTool == 1,
+      portalEraseMode: _panelTab == 3 && _currentTool == 2,
+      onPortalEraseCell: state.eraseLinePortalWorld,
+      onLinePortalCell: (int c, int r) {
+        if (!state.linePortalPick) state.toggleLinePortalPick();
+        state.pickLinePortalWorld(c, r);
+      },
+      selectedLinePortal: state.selectedLinePortal,
+      linePickStart: state.linePickStart,
       placedProps: state.placedProps,
       propTypes: state.propTypes,
-      propMode: _panelTab == 1,
-      onPropCell: state.togglePropAt,
+      propMode: _panelTab == 1 && _currentTool != 0,
+      onPropCell: _currentTool == 2 ? state.erasePropWorld : state.placePropWorld,
       placedObjects: state.placedObjects,
-      objectMode: _panelTab == 2,
-      onObjectCell: state.toggleObjectAt,
+      objectMode: _panelTab == 2 && _currentTool != 0,
+      onObjectCell: _currentTool == 2 ? state.eraseObjectWorld : state.placeObjectWorld,
       worldStartCol: state.worldStartCol,
       worldStartRow: state.worldStartRow,
       startPickMode: state.startPick,
-      onStartCell: state.setStartFromCell,
+      onStartCell: state.setStartWorld,
       solids: state.solids,
       solidMode: state.solidPick,
-      onSolidCell: state.pickSolidCell,
+      onSolidCell: state.pickSolidWorld,
       solidDraft: state.solidDraft,
       solidSelectMode: _panelTab == 5 && !state.solidPick,
-      onSolidSelectCell: state.selectSolidAtCell,
+      onSolidSelectCell: state.selectSolidWorld,
       selectedSolid: state.selectedSolid,
-      padMode: state.padPick,
-      onPadCell: state.addPadAtCell,
+      padMode: _panelTab == 7 && _currentTool != 0,
+      onPadCell: _currentTool == 2 ? state.removePadWorld : state.placePadWorld,
       pickMode: state.pickPlane,
-      onPickCell: state.pickCell,
+      onPickCell: state.pickPlaneWorld,
     );
   }
 
-  Widget _rightPanel(JoPalette p) {
+  Widget _rightPanel(JoPalette p, double width) {
     return SizedBox(
-      width: 300,
+      width: width,
       child: ColoredBox(
         color: p.surface,
         child: Column(
@@ -495,14 +620,18 @@ class _EditorPageState extends State<EditorPage> {
                   (label: '地形', value: 0),
                   (label: '道具', value: 1),
                   (label: '对象', value: 2),
-                  (label: '传送', value: 3),
+                  (label: '传送门', value: 3),
+                  (label: '传送格', value: 7),
                   (label: '段', value: 4),
                   (label: '碰撞', value: 5),
                   (label: '世界', value: 6),
                 ],
                 value: _panelTab,
                 onChanged: (v) {
-                  setState(() => _panelTab = v);
+                  setState(() {
+                    if (state.linePortalPick) state.toggleLinePortalPick();
+                    _panelTab = v;
+                  });
                   if (v == 3 && state.selectedPlane < 0 && state.planes.isNotEmpty) {
                     state.selectPlane(0);
                   }
@@ -516,6 +645,7 @@ class _EditorPageState extends State<EditorPage> {
                 1 => _propPanel(p),
                 2 => _objectPanel(p),
                 3 => _portalPanel(p),
+                7 => _padPanel(p),
                 4 => _segmentPanel(p),
                 5 => _solidPanel(p),
                 _ => _worldPanel(p),
@@ -712,109 +842,128 @@ class _EditorPageState extends State<EditorPage> {
             '${w.segments.length} 个',
             style: JoTheme.meta(context).copyWith(color: p.text),
           ),
-          const SizedBox(height: JoSpace.s4),
-          _label(p, '传送格'),
-          Row(
-            children: [
-              JoButton(
-                text: state.padPick ? '点画布放置…' : '新建传送格',
-                bordered: true,
-                color: state.padPick ? p.accent : null,
-                onTap: state.togglePadPick,
-              ),
-              const SizedBox(width: JoSpace.s2),
-              JoButton(
-                text: '删除',
-                danger: true,
-                onTap: state.selectedPad < 0 ||
-                        state.selectedPad >= state.pads.length
-                    ? null
-                    : () => state.removePad(state.selectedPad),
-              ),
-            ],
-          ),
-          if (state.pads.isEmpty)
-            Padding(
-              padding: const EdgeInsets.only(top: JoSpace.s2),
-              child: Text(
-                '还没有传送格',
-                style: JoTheme.meta(context).copyWith(color: p.secondary),
-              ),
-            )
-          else
-            for (int i = 0; i < state.pads.length; i++)
-              JoListRow(
-                title: state.pads[i].label,
-                selected: i == state.selectedPad,
-                onTap: () => setState(() => state.selectedPad = i),
-              ),
-          const SizedBox(height: JoSpace.s4),
-          _label(p, '连线'),
-          if (state.pads.length < 2)
-            Text(
-              '至少两个传送格才能连线',
-              style: JoTheme.meta(context).copyWith(color: p.secondary),
-            )
-          else ...[
-            JoDropdown<String>(
-              items: [
-                for (final portal in state.pads)
-                  (label: portal.id, value: portal.id),
-              ],
-              value: _linkFrom,
-              placeholder: '起点',
-              onChanged: (v) => setState(() => _linkFrom = v),
-            ),
-            const SizedBox(height: JoSpace.s1),
-            JoDropdown<String>(
-              items: [
-                for (final portal in state.pads)
-                  (label: portal.id, value: portal.id),
-              ],
-              value: _linkTo,
-              placeholder: '终点',
-              onChanged: (v) => setState(() => _linkTo = v),
-            ),
-            const SizedBox(height: JoSpace.s1),
-            JoToggle(
-              on: _linkBidirectional,
-              onLabel: '双向',
-              offLabel: '单向',
-              onChanged: (v) => setState(() => _linkBidirectional = v),
-            ),
-            const SizedBox(height: JoSpace.s1),
-            JoButton(
-              text: '添加连线',
-              bordered: true,
-              onTap: _linkFrom == null || _linkTo == null
-                  ? null
-                  : () {
-                      state.addPadLink(
-                        _linkFrom!,
-                        _linkTo!,
-                        bidirectional: _linkBidirectional,
-                      );
-                      setState(() {});
-                    },
-            ),
-          ],
-          for (int i = 0; i < state.padLinks.length; i++)
-            JoListRow(
-              title: state.padLinks[i].label,
-              selected: i == state.selectedPadLink,
-              onTap: () => setState(() => state.selectedPadLink = i),
-            ),
-          if (state.padLinks.isNotEmpty)
-            Align(
-              alignment: Alignment.centerLeft,
-              child: JoButton(
-                text: '删除连线',
-                danger: true,
-                onTap: state.selectedPadLink < 0
-                    ? null
-                    : () => state.removePadLink(state.selectedPadLink),
-              ),
-            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _padPanel(JoPalette p) {
+    if (state.world == null) {
+      return Center(
+        child: Text(
+          '先打开一个世界',
+          style: JoTheme.meta(context).copyWith(color: p.secondary),
+        ),
+      );
+    }
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(JoSpace.s3),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+    const SizedBox(height: JoSpace.s4),
+    _label(p, '传送格'),
+    Row(
+      children: [
+        JoButton(
+          text: state.padPick ? '点画布放置…' : '新建传送格',
+          bordered: true,
+          color: state.padPick ? p.accent : null,
+          onTap: state.togglePadPick,
+        ),
+        const SizedBox(width: JoSpace.s2),
+        JoButton(
+          text: '删除',
+          danger: true,
+          onTap: state.selectedPad < 0 ||
+                  state.selectedPad >= state.pads.length
+              ? null
+              : () => state.removePad(state.selectedPad),
+        ),
+      ],
+    ),
+    if (state.pads.isEmpty)
+      Padding(
+        padding: const EdgeInsets.only(top: JoSpace.s2),
+        child: Text(
+          '还没有传送格',
+          style: JoTheme.meta(context).copyWith(color: p.secondary),
+        ),
+      )
+    else
+      for (int i = 0; i < state.pads.length; i++)
+        JoListRow(
+          title: state.pads[i].label,
+          selected: i == state.selectedPad,
+          onTap: () => setState(() => state.selectedPad = i),
+        ),
+    const SizedBox(height: JoSpace.s4),
+    _label(p, '连线'),
+    if (state.pads.length < 2)
+      Text(
+        '至少两个传送格才能连线',
+        style: JoTheme.meta(context).copyWith(color: p.secondary),
+      )
+    else ...[
+      JoDropdown<String>(
+        items: [
+          for (final portal in state.pads)
+            (label: portal.id, value: portal.id),
+        ],
+        value: _linkFrom,
+        placeholder: '起点',
+        onChanged: (v) => setState(() => _linkFrom = v),
+      ),
+      const SizedBox(height: JoSpace.s1),
+      JoDropdown<String>(
+        items: [
+          for (final portal in state.pads)
+            (label: portal.id, value: portal.id),
+        ],
+        value: _linkTo,
+        placeholder: '终点',
+        onChanged: (v) => setState(() => _linkTo = v),
+      ),
+      const SizedBox(height: JoSpace.s1),
+      JoToggle(
+        on: _linkBidirectional,
+        onLabel: '双向',
+        offLabel: '单向',
+        onChanged: (v) => setState(() => _linkBidirectional = v),
+      ),
+      const SizedBox(height: JoSpace.s1),
+      JoButton(
+        text: '添加连线',
+        bordered: true,
+        onTap: _linkFrom == null || _linkTo == null
+            ? null
+            : () {
+                state.addPadLink(
+                  _linkFrom!,
+                  _linkTo!,
+                  bidirectional: _linkBidirectional,
+                );
+                setState(() {});
+              },
+      ),
+    ],
+    for (int i = 0; i < state.padLinks.length; i++)
+      JoListRow(
+        title: state.padLinks[i].label,
+        selected: i == state.selectedPadLink,
+        onTap: () => setState(() => state.selectedPadLink = i),
+      ),
+    if (state.padLinks.isNotEmpty)
+      Align(
+        alignment: Alignment.centerLeft,
+        child: JoButton(
+          text: '删除连线',
+          danger: true,
+          onTap: state.selectedPadLink < 0
+              ? null
+              : () => state.removePadLink(state.selectedPadLink),
+        ),
+      ),
         ],
       ),
     );
@@ -862,72 +1011,263 @@ class _EditorPageState extends State<EditorPage> {
   }
 
   Widget _portalPanel(JoPalette p) {
-    final planes = state.planes;
+    final portals = state.linePortals;
+    final LinePortal? selectedPortal =
+        state.selectedLinePortal >= 0 && state.selectedLinePortal < portals.length
+            ? portals[state.selectedLinePortal]
+            : null;
+    final String sourceRef = selectedPortal == null
+        ? ''
+        : '${state.segment!.spec.id}/${selectedPortal.id}';
+    final List<({String segment, LinePortal portal})> linkTargets = [
+      for (final e in state.allLinePortals)
+        if ('${e.segment}/${e.portal.id}' != sourceRef &&
+            selectedPortal != null &&
+            e.portal.dir == selectedPortal.dir &&
+            e.portal.length == selectedPortal.length)
+          e,
+    ];
+    final List<({PortalLink link, int index})> myLinks = [
+      for (int i = 0; i < state.portalLinks.length; i++)
+        if (selectedPortal != null &&
+            (state.portalLinks[i].from == sourceRef ||
+                state.portalLinks[i].to == sourceRef))
+          (link: state.portalLinks[i], index: i),
+    ];
+
     if (state.world == null) {
       return Center(
-        child: Text('先打开一个世界', style: JoTheme.meta(context).copyWith(color: p.secondary)),
+        child: Text('先打开一个世界',
+            style: JoTheme.meta(context).copyWith(color: p.secondary)),
       );
     }
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: JoSpace.s2,
-            vertical: JoSpace.s2,
+        SizedBox(
+          height: appSettings.portalListHeight.clamp(
+            120.0,
+            (MediaQuery.sizeOf(context).height - 240)
+                .clamp(120.0, 700.0),
           ),
-          child: Row(
-            children: [
-              JoButton(text: '新建', bordered: true, onTap: state.addPlane),
-              const SizedBox(width: JoSpace.s2),
-              JoButton(
-                text: '删除',
-                danger: true,
-                onTap: state.selectedPlane < 0 ? null : state.removePlane,
-              ),
-              const SizedBox(width: JoSpace.s2),
-              JoButton(
-                text: state.pickPlane ? '拾取中…' : '画到画布',
-                bordered: true,
-                color: state.pickPlane ? p.accent : null,
-                onTap: state.selectedPlane < 0 ? null : state.togglePick,
-              ),
-            ],
+          child: JoListSection(
+            title: '传送门列表',
+            child: portals.isEmpty
+                ? Center(
+                    child: Text(
+                      '这一段还没有传送门',
+                      style: JoTheme.meta(context).copyWith(color: p.secondary),
+                    ),
+                  )
+                : ListView.builder(
+                    itemCount: portals.length,
+                    itemBuilder: (context, index) {
+                      final portal = portals[index];
+                      return JoListRow(
+                        title: portal.label,
+                        subtitle: '段内坐标',
+                        selected: index == state.selectedLinePortal,
+                        onTap: () => setState(() {
+                          state.selectedLinePortal = index;
+                          _portalNameCtrl.text = portal.id;
+                        }),
+                      );
+                    },
+                  ),
           ),
         ),
-        Container(height: 1, color: p.border),
+        JoSplitter(
+          palette: p,
+          axis: JoSplitterAxis.vertical,
+          colors: [p.surface, p.surface],
+          width: appSettings.portalListHeight,
+          minWidth: 120,
+          maxWidth: (MediaQuery.sizeOf(context).height - 240)
+              .clamp(120.0, 700.0),
+          defaultWidth: 240,
+          growsRight: true,
+          onResize: appSettings.setPortalListHeight,
+          onResizeEnd: appSettings.saveLayout,
+        ),
         Expanded(
-          child: planes.isEmpty
+          child: selectedPortal == null
               ? Center(
                   child: Text(
-                    '没有传送门平面',
+                    '选中一条传送门后编辑属性',
                     style: JoTheme.meta(context).copyWith(color: p.secondary),
                   ),
                 )
-              : ListView.builder(
-                  itemCount: planes.length,
-                  itemBuilder: (context, index) {
-                    final plane = planes[index];
-                    return JoListRow(
-                      title: '${plane.axis} @ ${plane.at}  ${plane.from}→${plane.to}',
-                      subtitle: _planeExitLabel(plane),
-                      selected: index == state.selectedPlane,
-                      onTap: () => state.selectPlane(index),
-                    );
-                  },
+              : SingleChildScrollView(
+                  padding: const EdgeInsets.all(JoSpace.s3),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _label(p, '方向'),
+                      JoSegment<String>(
+                        options: const [
+                          (label: '水平', value: 'right'),
+                          (label: '竖直', value: 'down'),
+                        ],
+                        value: selectedPortal.dir,
+                        onChanged: (v) => state.updateLinePortal(
+                          state.selectedLinePortal,
+                          dir: v,
+                        ),
+                      ),
+                      const SizedBox(height: JoSpace.s2),
+                      _label(p, '名称'),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: JoTextInput(
+                              controller: _portalNameCtrl,
+                              placeholder: '回车或应用',
+                              inputFormatters: [
+                                TextInputFormatter.withFunction(
+                                    (oldValue, newValue) {
+                                  if (newValue.composing.isValid &&
+                                      !newValue.composing.isCollapsed) {
+                                    return oldValue;
+                                  }
+                                  return newValue;
+                                }),
+                                FilteringTextInputFormatter.allow(
+                                  RegExp(r'[A-Za-z0-9_-]'),
+                                ),
+                              ],
+                              onSubmitted: (v) {
+                                state.renameLinePortal(
+                                  state.selectedLinePortal,
+                                  v,
+                                );
+                                setState(() {});
+                              },
+                            ),
+                          ),
+                          const SizedBox(width: JoSpace.s2),
+                          JoButton(
+                            text: '应用',
+                            bordered: true,
+                            onTap: () {
+                              state.renameLinePortal(
+                                state.selectedLinePortal,
+                                _portalNameCtrl.text,
+                              );
+                              setState(() {});
+                            },
+                          ),
+                        ],
+                      ),
+                      _numRow(
+                        p,
+                        '起点 x',
+                        selectedPortal.x,
+                        0,
+                        state.segment!.width,
+                        (v) =>
+                            state.updateLinePortal(state.selectedLinePortal, x: v),
+                      ),
+                      _numRow(
+                        p,
+                        '起点 y',
+                        selectedPortal.y,
+                        0,
+                        state.segment!.height,
+                        (v) =>
+                            state.updateLinePortal(state.selectedLinePortal, y: v),
+                      ),
+                      _numRow(
+                        p,
+                        '长度',
+                        selectedPortal.length,
+                        1,
+                        selectedPortal.horizontal
+                            ? state.segment!.width
+                            : state.segment!.height,
+                        (v) => state.updateLinePortal(
+                          state.selectedLinePortal,
+                          length: v,
+                        ),
+                      ),
+                      const SizedBox(height: JoSpace.s4),
+                      _label(p, '连接'),
+                      Text(
+                        '源：$sourceRef',
+                        style: JoTheme.meta(context).copyWith(color: p.text),
+                      ),
+                      const SizedBox(height: JoSpace.s1),
+                      JoSegment<String>(
+                        options: selectedPortal.horizontal
+                            ? const [
+                                (label: 'A 面（左）', value: 'A'),
+                                (label: 'B 面（右）', value: 'B'),
+                                (label: '双面', value: 'both'),
+                              ]
+                            : const [
+                                (label: 'A 面（上）', value: 'A'),
+                                (label: 'B 面（下）', value: 'B'),
+                                (label: '双面', value: 'both'),
+                              ],
+                        value: _portalLinkFace,
+                        onChanged: (v) => setState(() => _portalLinkFace = v),
+                      ),
+                      const SizedBox(height: JoSpace.s1),
+                      JoDropdown<String>(
+                        items: [
+                          for (final e in linkTargets)
+                            (
+                              label: '${e.segment}/${e.portal.id}',
+                              value: '${e.segment}/${e.portal.id}',
+                            ),
+                        ],
+                        value: _portalLinkTo,
+                        placeholder:
+                            linkTargets.isEmpty ? '没有符合条件的终点' : '终点',
+                        onChanged: (v) => setState(() => _portalLinkTo = v),
+                      ),
+                      const SizedBox(height: JoSpace.s1),
+                      Row(
+                        children: [
+                          JoButton(
+                            text: '添加连接',
+                            bordered: true,
+                            onTap: _portalLinkTo == null
+                                ? null
+                                : () {
+                                    state.addPortalLink(
+                                      sourceRef,
+                                      _portalLinkTo!,
+                                      face: _portalLinkFace,
+                                    );
+                                    setState(() {});
+                                  },
+                          ),
+                          const SizedBox(width: JoSpace.s2),
+                          JoButton(
+                            text: '删除连接',
+                            danger: true,
+                            onTap: myLinks.any(
+                                    (e) => e.index == _selectedPortalLink)
+                                ? () => setState(() {
+                                      state.removePortalLink(_selectedPortalLink);
+                                      _selectedPortalLink = -1;
+                                    })
+                                : null,
+                          ),
+                        ],
+                      ),
+                      for (final e in myLinks)
+                        JoListRow(
+                          title: e.link.label,
+                          selected: e.index == _selectedPortalLink,
+                          onTap: () =>
+                              setState(() => _selectedPortalLink = e.index),
+                        ),
+                    ],
+                  ),
                 ),
         ),
-        if (state.selectedPlane >= 0 && state.selectedPlane < planes.length) ...[
-          Container(height: 1, color: p.border),
-          SizedBox(
-            height: 300,
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(JoSpace.s3),
-              child: _planeEditor(p, planes[state.selectedPlane]),
-            ),
-          ),
-        ],
       ],
     );
   }
@@ -1021,6 +1361,9 @@ class _EditorPageState extends State<EditorPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          _numRow(p, 'origin z', spec.originZ, -16, 16,
+              (v) => state.updateSegmentSpec(spec, originZ: v)),
+          const SizedBox(height: JoSpace.s3),
           _label(p, '名称'),
           JoTextInput(
             key: ValueKey('seg-name-$index'),
@@ -1132,78 +1475,133 @@ class _EditorPageState extends State<EditorPage> {
   }
 
   Widget _prefsOverlay(JoPalette p) {
+    final Size screen = MediaQuery.sizeOf(context);
+    final double width = (screen.width * 0.72).clamp(520.0, 980.0);
+    final double height = (screen.height * 0.72).clamp(360.0, 720.0);
+
+    Widget page;
+    switch (_prefsTab) {
+      case 0:
+        page = Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _label(p, '主题'),
+            JoSegment<bool>(
+              options: const [
+                (label: '暗 · 机器', value: true),
+                (label: '明 · 纸', value: false),
+              ],
+              value: appSettings.dark,
+              onChanged: appSettings.setDark,
+            ),
+          ],
+        );
+        break;
+      default:
+        page = Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '开发者模式',
+                    style: JoTheme.ui(context).copyWith(fontSize: 13, color: p.text),
+                  ),
+                ),
+                JoToggle(
+                  on: appSettings.developerMode,
+                  onChanged: appSettings.setDeveloperMode,
+                ),
+              ],
+            ),
+            const SizedBox(height: JoSpace.s2),
+            Text(
+              '开启后显示打开世界目录、导入到世界目录等入口。',
+              style: JoTheme.meta(context).copyWith(color: p.secondary),
+            ),
+          ],
+        );
+    }
+
     return Positioned.fill(
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTap: () => setState(() => _prefsOpen = false),
+        onTap: () {},
         child: ColoredBox(
           color: const Color(0x99000000),
           child: Center(
-            child: GestureDetector(
-              onTap: () {},
+            child: SizedBox(
+              width: width,
+              height: height,
               child: Container(
-                width: 360,
-                padding: const EdgeInsets.all(JoSpace.s5),
                 decoration: BoxDecoration(
                   color: p.surface,
                   border: JoShape.border(p.border),
                   borderRadius: JoShape.br,
                 ),
                 child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    Text(
-                      '首选项',
-                      style: JoTheme.ui(context).copyWith(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w700,
-                        color: p.text,
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(
+                        JoSpace.s5, JoSpace.s4, JoSpace.s5, JoSpace.s3),
+                      child: Text(
+                        '首选项',
+                        style: JoTheme.ui(context).copyWith(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                          color: p.text,
+                        ),
                       ),
                     ),
-                    const SizedBox(height: JoSpace.s4),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            '开发者模式',
-                            style: JoTheme.ui(context)
-                                .copyWith(fontSize: 13, color: p.text),
+                    Container(height: 1, color: p.border),
+                    Expanded(
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          SizedBox(
+                            width: 170,
+                            child: ColoredBox(
+                              color: p.bg,
+                              child: ListView(
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: JoSpace.s2),
+                                children: [
+                                  JoListRow(
+                                    title: '外观',
+                                    selected: _prefsTab == 0,
+                                    onTap: () => setState(() => _prefsTab = 0),
+                                  ),
+                                  JoListRow(
+                                    title: '开发者',
+                                    selected: _prefsTab == 1,
+                                    onTap: () => setState(() => _prefsTab = 1),
+                                  ),
+                                ],
+                              ),
+                            ),
                           ),
-                        ),
-                        JoToggle(
-                          on: appSettings.developerMode,
-                          onChanged: appSettings.setDeveloperMode,
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: JoSpace.s3),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            '主题',
-                            style: JoTheme.ui(context)
-                                .copyWith(fontSize: 13, color: p.text),
+                          Container(width: 1, color: p.border),
+                          Expanded(
+                            child: SingleChildScrollView(
+                              padding: const EdgeInsets.all(JoSpace.s5),
+                              child: page,
+                            ),
                           ),
-                        ),
-                        JoSegment<bool>(
-                          options: const [
-                            (label: '暗 · 机器', value: true),
-                            (label: '明 · 纸', value: false),
-                          ],
-                          value: appSettings.dark,
-                          onChanged: appSettings.setDark,
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
-                    const SizedBox(height: JoSpace.s5),
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: JoButton(
-                        text: '关闭',
-                        bordered: true,
-                        onTap: () => setState(() => _prefsOpen = false),
+                    Container(height: 1, color: p.border),
+                    Padding(
+                      padding: const EdgeInsets.all(JoSpace.s3),
+                      child: Align(
+                        alignment: Alignment.centerRight,
+                        child: JoButton(
+                          text: '关闭',
+                          bordered: true,
+                          onTap: () => setState(() => _prefsOpen = false),
+                        ),
                       ),
                     ),
                   ],
@@ -1220,7 +1618,7 @@ class _EditorPageState extends State<EditorPage> {
     return Positioned.fill(
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTap: () => setState(() => _saveGuardOpen = false),
+        onTap: () {},
         child: ColoredBox(
           color: const Color(0x99000000),
           child: Center(
@@ -1302,7 +1700,7 @@ class _EditorPageState extends State<EditorPage> {
     return Positioned.fill(
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTap: () => setState(() => _historyOpen = false),
+        onTap: () {},
         child: ColoredBox(
           color: const Color(0x99000000),
           child: Center(
@@ -1381,7 +1779,7 @@ class _EditorPageState extends State<EditorPage> {
     return Positioned.fill(
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTap: () => setState(() => _closePromptOpen = false),
+        onTap: () {},
         child: ColoredBox(
           color: const Color(0x99000000),
           child: Center(
@@ -1456,10 +1854,7 @@ class _EditorPageState extends State<EditorPage> {
     return Positioned.fill(
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTap: () => setState(() {
-          _newSegOpen = false;
-          _delSegOpen = false;
-        }),
+        onTap: () {},
         child: ColoredBox(
           color: const Color(0x99000000),
           child: Center(
@@ -1474,7 +1869,7 @@ class _EditorPageState extends State<EditorPage> {
     return Positioned.fill(
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTap: () => setState(() => _newWorldOpen = false),
+        onTap: () {},
         child: ColoredBox(
           color: const Color(0x99000000),
           child: Center(
@@ -1577,7 +1972,7 @@ class _EditorPageState extends State<EditorPage> {
     return Positioned.fill(
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTap: () => setState(() => _aboutOpen = false),
+        onTap: () {},
         child: ColoredBox(
           color: const Color(0x99000000),
           child: Center(
@@ -1672,7 +2067,7 @@ class _EditorPageState extends State<EditorPage> {
     return Positioned.fill(
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTap: () => setState(() => _licensesOpen = false),
+        onTap: () {},
         child: ColoredBox(
           color: const Color(0x99000000),
           child: Center(

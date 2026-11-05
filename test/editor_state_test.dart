@@ -188,13 +188,16 @@ void main() {
     state.renameSegmentFile();
 
     expect(spec.file, 'new.seg');
+    // 改名只改内存，旧文件还在，保存时才落盘并清理。
+    expect(File('${worldDir.path}/s.seg').existsSync(), isTrue);
+    WorldIo.saveWorld(world);
     expect(File('${worldDir.path}/new.seg').existsSync(), isTrue);
     expect(File('${worldDir.path}/s.seg').existsSync(), isFalse);
   });
 
   test('.gmap 解出的文件能直接组成世界', () {
     final files = <String, String>{
-      'world.json': '{"version":1,"segments":[{"id":"main","file":"main.seg","origin":[0,0]}],'
+      'world.json': '{"version":1,"segments":[{"id":"main","file":"main.seg","origin":[0,0,0]}],'
           '"portal_planes":[{"axis":"x","at":4,"from":0,"to":2,"direction":"+","target":[0,0]}],'
           '"start":{"col":1,"row":1}}',
       'main.seg': '....\n####\n',
