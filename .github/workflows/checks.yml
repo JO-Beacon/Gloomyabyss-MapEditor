@@ -25,6 +25,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Checkout JO-DraftUI
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone https://github.com/JO-Beacon/JO-DraftUI.git "$GITHUB_WORKSPACE/../JO-DraftUI"
+          git -C "$GITHUB_WORKSPACE/../JO-DraftUI" checkout 7e25570758b5ae0f68cb88aa9edb14c8e763324f
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
