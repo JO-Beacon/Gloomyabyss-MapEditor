@@ -33,6 +33,9 @@ class _EditorPageState extends State<EditorPage> {
   int _newWorldWidth = 32;
   int _newWorldHeight = 24;
   int _panelTab = 0;
+  String? _linkFrom;
+  String? _linkTo;
+  bool _linkBidirectional = false;
 
   static const MethodChannel _windowChannel = MethodChannel('jodraft/window');
 
@@ -156,6 +159,19 @@ class _EditorPageState extends State<EditorPage> {
 
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
+
+    final key0 = event.logicalKey;
+    if (key0 == LogicalKeyboardKey.delete || key0 == LogicalKeyboardKey.backspace) {
+      if (!JoTextField.isEditing &&
+          _panelTab == 5 &&
+          !state.solidPick &&
+          state.selectedSolid >= 0 &&
+          state.selectedSolid < state.solids.length) {
+        state.removeSolid(state.solids[state.selectedSolid].instructionIndex);
+        return KeyEventResult.handled;
+      }
+    }
+
     final keyboard = HardwareKeyboard.instance;
     if (!keyboard.isControlPressed) return KeyEventResult.ignored;
 
@@ -454,6 +470,11 @@ class _EditorPageState extends State<EditorPage> {
       solidMode: state.solidPick,
       onSolidCell: state.pickSolidCell,
       solidDraft: state.solidDraft,
+      solidSelectMode: _panelTab == 5 && !state.solidPick,
+      onSolidSelectCell: state.selectSolidAtCell,
+      selectedSolid: state.selectedSolid,
+      padMode: state.padPick,
+      onPadCell: state.addPadAtCell,
       pickMode: state.pickPlane,
       onPickCell: state.pickCell,
     );
@@ -691,6 +712,109 @@ class _EditorPageState extends State<EditorPage> {
             '${w.segments.length} 个',
             style: JoTheme.meta(context).copyWith(color: p.text),
           ),
+          const SizedBox(height: JoSpace.s4),
+          _label(p, '传送格'),
+          Row(
+            children: [
+              JoButton(
+                text: state.padPick ? '点画布放置…' : '新建传送格',
+                bordered: true,
+                color: state.padPick ? p.accent : null,
+                onTap: state.togglePadPick,
+              ),
+              const SizedBox(width: JoSpace.s2),
+              JoButton(
+                text: '删除',
+                danger: true,
+                onTap: state.selectedPad < 0 ||
+                        state.selectedPad >= state.pads.length
+                    ? null
+                    : () => state.removePad(state.selectedPad),
+              ),
+            ],
+          ),
+          if (state.pads.isEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: JoSpace.s2),
+              child: Text(
+                '还没有传送格',
+                style: JoTheme.meta(context).copyWith(color: p.secondary),
+              ),
+            )
+          else
+            for (int i = 0; i < state.pads.length; i++)
+              JoListRow(
+                title: state.pads[i].label,
+                selected: i == state.selectedPad,
+                onTap: () => setState(() => state.selectedPad = i),
+              ),
+          const SizedBox(height: JoSpace.s4),
+          _label(p, '连线'),
+          if (state.pads.length < 2)
+            Text(
+              '至少两个传送格才能连线',
+              style: JoTheme.meta(context).copyWith(color: p.secondary),
+            )
+          else ...[
+            JoDropdown<String>(
+              items: [
+                for (final portal in state.pads)
+                  (label: portal.id, value: portal.id),
+              ],
+              value: _linkFrom,
+              placeholder: '起点',
+              onChanged: (v) => setState(() => _linkFrom = v),
+            ),
+            const SizedBox(height: JoSpace.s1),
+            JoDropdown<String>(
+              items: [
+                for (final portal in state.pads)
+                  (label: portal.id, value: portal.id),
+              ],
+              value: _linkTo,
+              placeholder: '终点',
+              onChanged: (v) => setState(() => _linkTo = v),
+            ),
+            const SizedBox(height: JoSpace.s1),
+            JoToggle(
+              on: _linkBidirectional,
+              onLabel: '双向',
+              offLabel: '单向',
+              onChanged: (v) => setState(() => _linkBidirectional = v),
+            ),
+            const SizedBox(height: JoSpace.s1),
+            JoButton(
+              text: '添加连线',
+              bordered: true,
+              onTap: _linkFrom == null || _linkTo == null
+                  ? null
+                  : () {
+                      state.addPadLink(
+                        _linkFrom!,
+                        _linkTo!,
+                        bidirectional: _linkBidirectional,
+                      );
+                      setState(() {});
+                    },
+            ),
+          ],
+          for (int i = 0; i < state.padLinks.length; i++)
+            JoListRow(
+              title: state.padLinks[i].label,
+              selected: i == state.selectedPadLink,
+              onTap: () => setState(() => state.selectedPadLink = i),
+            ),
+          if (state.padLinks.isNotEmpty)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: JoButton(
+                text: '删除连线',
+                danger: true,
+                onTap: state.selectedPadLink < 0
+                    ? null
+                    : () => state.removePadLink(state.selectedPadLink),
+              ),
+            ),
         ],
       ),
     );

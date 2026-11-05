@@ -37,6 +37,11 @@ class MapCanvas extends StatefulWidget {
     this.solidMode = false,
     this.onSolidCell,
     this.solidDraft = const <(int, int)>[],
+    this.solidSelectMode = false,
+    this.onSolidSelectCell,
+    this.selectedSolid = -1,
+    this.padMode = false,
+    this.onPadCell,
   });
 
   final Segment segment;
@@ -74,6 +79,11 @@ class MapCanvas extends StatefulWidget {
   final bool solidMode;
   final void Function(int col, int row)? onSolidCell;
   final List<(int, int)> solidDraft;
+  final bool solidSelectMode;
+  final void Function(int col, int row)? onSolidSelectCell;
+  final int selectedSolid;
+  final bool padMode;
+  final void Function(int col, int row)? onPadCell;
 
   @override
   State<MapCanvas> createState() => _MapCanvasState();
@@ -222,6 +232,16 @@ class _MapCanvasState extends State<MapCanvas> {
                   widget.onSolidCell?.call(cx, cy);
                   return;
                 }
+                if (widget.solidSelectMode) {
+                  final (int cc, int rr) = _cellAt(event.localPosition);
+                  widget.onSolidSelectCell?.call(cc, rr);
+                  return;
+                }
+                if (widget.padMode) {
+                  final (int cc, int rr) = _cellAt(event.localPosition);
+                  widget.onPadCell?.call(cc, rr);
+                  return;
+                }
                 _stroking = true;
                 widget.onStrokeStart();
                 _paintAt(event.localPosition);
@@ -283,6 +303,7 @@ class _MapCanvasState extends State<MapCanvas> {
                   worldStartRow: widget.worldStartRow,
                   solids: widget.solids,
                   solidDraft: widget.solidDraft,
+                  selectedSolid: widget.selectedSolid,
                   solidHoverCell: _hoverCell,
                   accentColor: p.accent,
                 ),
@@ -351,6 +372,7 @@ class _MapPainter extends CustomPainter {
     required this.solids,
     required this.solidDraft,
     required this.solidHoverCell,
+    required this.selectedSolid,
     required this.accentColor,
   });
 
@@ -371,6 +393,7 @@ class _MapPainter extends CustomPainter {
   final List<SolidShape> solids;
   final List<(int, int)> solidDraft;
   final (int, int)? solidHoverCell;
+  final int selectedSolid;
   final Color accentColor;
 
   @override
@@ -540,11 +563,13 @@ class _MapPainter extends CustomPainter {
       }
     }
 
-    for (final SolidShape solid in solids) {
+    for (int si = 0; si < solids.length; si++) {
+      final SolidShape solid = solids[si];
+      final bool sel = si == selectedSolid;
       final Paint line = Paint()
-        ..color = const Color(0xFFD96C6C)
+        ..color = sel ? accentColor : const Color(0xFFD96C6C)
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 2;
+        ..strokeWidth = sel ? 3 : 2;
       final Path path = Path();
       for (int i = 0; i < solid.points.length; i++) {
         final (int px, int py) = solid.points[i];

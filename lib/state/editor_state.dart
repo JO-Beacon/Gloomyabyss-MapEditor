@@ -9,6 +9,7 @@ import '../io/gmap.dart';
 import '../models/obj.dart';
 import '../models/prop.dart';
 import '../models/solid.dart';
+import '../models/pad.dart';
 import '../models/terrain.dart';
 import '../models/world.dart';
 
@@ -64,6 +65,13 @@ class EditorState extends ChangeNotifier {
   int? _pickStart;
 
   bool startPick = false;
+  bool padPick = false;
+  int selectedPad = -1;
+  int selectedPadLink = -1;
+
+  List<Pad> get pads => parsePads(world?.raw['pads']);
+  List<PadLink> get padLinks => parsePadLinks(world?.raw['pad_links']);
+
   bool solidPick = false;
   int selectedSolid = -1;
   final List<(int, int)> _solidDraft = [];
@@ -149,8 +157,8 @@ class EditorState extends ChangeNotifier {
       raw: <String, dynamic>{
         'version': 1,
         'segments': <dynamic>[],
-        'portals': <dynamic>[],
-        'links': <dynamic>[],
+        'pads': <dynamic>[],
+        'pad_links': <dynamic>[],
         'seams': <dynamic>[],
         'portal_planes': <dynamic>[],
         'start': {'col': 2.clamp(1, cols - 1), 'row': 2.clamp(1, lineCount - 1)},
@@ -377,11 +385,11 @@ class EditorState extends ChangeNotifier {
       return;
     }
 
-    final List<dynamic> portals =
-        (w.raw['portals'] as List<dynamic>?) ?? const <dynamic>[];
-    for (final dynamic p in portals) {
+    final List<dynamic> pads =
+        (w.raw['pads'] as List<dynamic>?) ?? const <dynamic>[];
+    for (final dynamic p in pads) {
       if (p is Map && p['segment'] == s.spec.id) {
-        setError('有传送门引用这一段，先删传送门');
+        setError('有传送格引用这一段，先删传送格');
         return;
       }
     }
@@ -642,7 +650,7 @@ class EditorState extends ChangeNotifier {
     w.portalPlanes.add(plane);
     selectedPlane = w.portalPlanes.length - 1;
     _push(_Action(
-      label: '新建传送门',
+      label: '新建传送格',
       undo: () {
         w.portalPlanes.remove(plane);
         if (selectedPlane >= w.portalPlanes.length) {
@@ -670,7 +678,7 @@ class EditorState extends ChangeNotifier {
       selectedPlane = w.portalPlanes.length - 1;
     }
     _push(_Action(
-      label: '删除传送门',
+      label: '删除传送格',
       undo: () {
         w.portalPlanes.insert(index, plane);
         selectedPlane = index;
@@ -738,10 +746,119 @@ class EditorState extends ChangeNotifier {
     }
 
     _push(_Action(
-      label: '改传送门',
+      label: '改传送格',
       undo: () => apply(before),
       redo: () => apply(after),
     ));
+    notifyListeners();
+  }
+
+  List<Map<String, dynamic>> _rawList(String key) {
+    final v = world?.raw[key];
+    if (v is! List) return <Map<String, dynamic>>[];
+    return v
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+  }
+
+  void _setRawList(String key, List<Map<String, dynamic>> list) {
+    world?.raw[key] = list.map((e) => Map<String, dynamic>.from(e)).toList();
+  }
+
+  void _editLists(
+    String label,
+    void Function(List<Map<String, dynamic>> pads, List<Map<String, dynamic>> padLinks) fn,
+  ) {
+    final beforeP = _rawList('pads');
+    final beforeL = _rawList('pad_links');
+    final afterP = _rawList('pads');
+    final afterL = _rawList('pad_links');
+    fn(afterP, afterL);
+    _setRawList('pads', afterP);
+    _setRawList('pad_links', afterL);
+
+    _push(_Action(
+      label: label,
+      undo: () {
+        _setRawList('pads', beforeP);
+        _setRawList('pad_links', beforeL);
+        notifyListeners();
+      },
+      redo: () {
+        _setRawList('pads', afterP);
+        _setRawList('pad_links', afterL);
+        notifyListeners();
+      },
+    ));
+    notifyListeners();
+  }
+
+  String _nextPadId() {
+    final ids = pads.map((p) => p.id).toSet();
+    int n = 1;
+    while (ids.contains('p$n')) {
+      n++;
+    }
+    return 'p$n';
+  }
+
+  void togglePadPick() {
+    padPick = !padPick;
+    if (padPick) {
+      startPick = false;
+      solidPick = false;
+      pickPlane = false;
+    }
+    notifyListeners();
+  }
+
+  void addPadAtCell(int col, int row) {
+    final s = segment;
+    if (s == null || !padPick) return;
+    final id = _nextPadId();
+    _editLists('加传送格', (pads, padLinks) {
+      pads.add(<String, dynamic>{
+        'id': id,
+        'segment': s.spec.id,
+        'col': col,
+        'row': row,
+      });
+    });
+    padPick = false;
+    selectedPad = pads.length - 1;
+    notifyListeners();
+  }
+
+  void removePad(int index) {
+    final list = pads;
+    if (index < 0 || index >= list.length) return;
+    final id = list[index].id;
+    _editLists('删传送格', (pads, padLinks) {
+      pads.removeWhere((p) => p['id'] == id);
+      padLinks.removeWhere((l) => l['from'] == id || l['to'] == id);
+    });
+    selectedPad = -1;
+    notifyListeners();
+  }
+
+  void addPadLink(String from, String to, {bool bidirectional = false}) {
+    if (from == to) return;
+    _editLists('加连线', (pads, padLinks) {
+      padLinks.add(<String, dynamic>{
+        'from': from,
+        'to': to,
+        if (bidirectional) 'bidirectional': true,
+      });
+    });
+  }
+
+  void removePadLink(int index) {
+    if (index < 0 || index >= padLinks.length) return;
+    _editLists('删连线', (pads, padLinks) {
+      padLinks.removeAt(index);
+    });
+    selectedPadLink = -1;
     notifyListeners();
   }
 
@@ -754,6 +871,30 @@ class EditorState extends ChangeNotifier {
   void selectSolid(int index) {
     selectedSolid = index;
     notifyListeners();
+  }
+
+  static bool _pointInPolygon(double x, double y, List<(int, int)> pts) {
+    bool inside = false;
+    for (int i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+      final (int xi, int yi) = pts[i];
+      final (int xj, int yj) = pts[j];
+      final bool cross = ((yi > y) != (yj > y)) &&
+          (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+      if (cross) inside = !inside;
+    }
+    return inside;
+  }
+
+  /// 画布上点碰撞内部 → 选中它。
+  void selectSolidAtCell(int col, int row) {
+    final list = solids;
+    for (int i = 0; i < list.length; i++) {
+      if (_pointInPolygon(col + 0.5, row + 0.5, list[i].points)) {
+        selectedSolid = i;
+        notifyListeners();
+        return;
+      }
+    }
   }
 
   void toggleSolidPick() {
@@ -875,7 +1016,7 @@ class EditorState extends ChangeNotifier {
         }
         if (blocked) continue;
 
-        out.add([(ax, ay), (bx, by), (cx, cy)]);
+        if (cross != 0) out.add([(ax, ay), (bx, by), (cx, cy)]);
         work.removeAt(i);
         found = true;
         break;

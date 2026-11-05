@@ -43,7 +43,7 @@ class Segment {
   final SegmentSpec spec;
   List<String> rows;
 
-  /// 行首以 `;` 开头的指令（prop / spawn / portal / solid / player / name…）。
+  /// 行首以 `;` 开头的指令（prop / spawn / pad / solid / name…）。
   /// 编辑器不解释它们，只保证原样读写，不丢失。
   List<String> instructions;
 
