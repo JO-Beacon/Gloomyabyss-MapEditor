@@ -9,6 +9,7 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  crypto: ^3.0.8
   file_picker: ^13.3.2
   jo_draftui:
     path: ../JO-DraftUI/flutter
@@ -21,8 +22,13 @@ dev_dependencies:
 flutter:
   uses-material-design: false
   assets:
+    - assets/default/manifest.json
     - assets/default/terrain.json
     - assets/default/props.json
     - assets/default/objects.json
+    - assets/default/versions/1/manifest.json
+    - assets/default/versions/1/terrain.json
+    - assets/default/versions/1/props.json
+    - assets/default/versions/1/objects.json
     - THIRD-PARTY-NOTICES.md
     - licenses/

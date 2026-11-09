@@ -7,9 +7,11 @@ import 'package:jo_draftui/jo_draftui.dart';
 import '../models/obj.dart';
 import '../models/prop.dart';
 import '../models/line_portal.dart';
+import '../models/pad.dart';
 import '../models/solid.dart';
 import '../models/terrain.dart';
 import '../models/world.dart';
+import '../world/geometry.dart';
 
 class MapCanvas extends StatefulWidget {
   const MapCanvas({
@@ -55,6 +57,9 @@ class MapCanvas extends StatefulWidget {
     this.onPortalEraseCell,
     this.fitEpoch = 0,
     this.onViewChanged,
+    this.selection,
+    this.onSelectionChanged,
+    this.onMoveSelection,
   });
 
   final World world;
@@ -115,6 +120,13 @@ class MapCanvas extends StatefulWidget {
   final int fitEpoch;
   final void Function(double scale, double fitScale, bool fit)? onViewChanged;
 
+  /// 当前矩形选区（世界坐标）。
+  final CellRect? selection;
+  final ValueChanged<CellRect?>? onSelectionChanged;
+
+  /// 拖动选区移动时的世界坐标偏移。
+  final void Function(int dc, int dr)? onMoveSelection;
+
   @override
   State<MapCanvas> createState() => _MapCanvasState();
 }
@@ -131,6 +143,8 @@ class _MapCanvasState extends State<MapCanvas> {
   bool _lineDragging = false;
   Offset? _marqueeStart;
   Offset? _marqueeCurrent;
+  bool _movingSelection = false;
+  (int, int)? _moveStartCell;
   bool _panning = false;
   Offset _lastPointer = Offset.zero;
   (int, int)? _hoverCell;
@@ -156,8 +170,16 @@ class _MapCanvasState extends State<MapCanvas> {
     return fit.clamp(2.0, 32.0);
   }
 
-  double get _minZoom => math.min(4.0, _fitScale(_viewport));
-  double get _maxZoom => _fitScale(_viewport) * 20;
+  /// 缩小按“适应窗口比例”计算，最小 10%；放大使用绝对的 64px/格。
+  static const double _minZoomRatio = 0.1;
+  static const double _maxCellPixels = 64.0;
+
+  double get _minZoom {
+    final fit = _fitScale(_viewport);
+    return (fit * _minZoomRatio).clamp(0.1, 4.0).toDouble();
+  }
+
+  double get _maxZoom => math.max(_maxCellPixels, _minZoom);
 
   double get _effectiveScale => _fit
       ? _fitScale(_viewport)
@@ -310,6 +332,13 @@ class _MapCanvasState extends State<MapCanvas> {
                   return;
                 }
                 if (!widget.paintEnabled) {
+                  final (int c, int r) = _cellAt(event.localPosition);
+                  final CellRect? current = widget.selection;
+                  if (current != null && current.containsCell(c, r)) {
+                    _movingSelection = true;
+                    _moveStartCell = (c, r);
+                    return;
+                  }
                   _marqueeStart = event.localPosition;
                   _marqueeCurrent = event.localPosition;
                   setState(() {});
@@ -326,6 +355,9 @@ class _MapCanvasState extends State<MapCanvas> {
                 final delta = event.localPosition - _lastPointer;
                 _lastPointer = event.localPosition;
                 setState(() => _pan += delta);
+                return;
+              }
+              if (_movingSelection) {
                 return;
               }
               if (_marqueeStart != null) {
@@ -354,16 +386,43 @@ class _MapCanvasState extends State<MapCanvas> {
               }
             },
             onPointerUp: (event) {
+              if (_movingSelection) {
+                final (int c, int r) = _cellAt(event.localPosition);
+                final (int, int)? start = _moveStartCell;
+                _movingSelection = false;
+                _moveStartCell = null;
+                if (start != null) {
+                  final int dc = c - start.$1;
+                  final int dr = r - start.$2;
+                  if (dc != 0 || dr != 0) {
+                    widget.onMoveSelection?.call(dc, dr);
+                  }
+                }
+              }
               if (_marqueeStart != null) {
+                final Offset start = _marqueeStart!;
+                final (int c0, int r0) = _cellAt(start);
+                final (int c1, int r1) = _cellAt(event.localPosition);
+                final int left = math.min(c0, c1);
+                final int top = math.min(r0, r1);
+                final int right = math.max(c0, c1);
+                final int bottom = math.max(r0, r1);
                 setState(() {
                   _marqueeStart = null;
                   _marqueeCurrent = null;
                 });
+                if (right > left && bottom > top) {
+                  widget.onSelectionChanged?.call(
+                    CellRect(left, top, right - left, bottom - top),
+                  );
+                } else {
+                  widget.onSelectionChanged?.call(null);
+                }
               }
               if (_lineDragging) {
+                // 点两下取线：按下时已经处理了落点；抬起时不能再报一次，
+                // 否则一次点击会同时结束上一条并开始下一条。
                 _lineDragging = false;
-                final (int cc, int rr) = _cornerAt(event.localPosition);
-                widget.onLinePortalCell?.call(cc, rr);
               }
               if (_stroking) {
                 _stroking = false;
@@ -372,6 +431,8 @@ class _MapCanvasState extends State<MapCanvas> {
               _panning = false;
             },
             onPointerCancel: (event) {
+              _movingSelection = false;
+              _moveStartCell = null;
               if (_marqueeStart != null) {
                 setState(() {
                   _marqueeStart = null;
@@ -429,6 +490,7 @@ class _MapCanvasState extends State<MapCanvas> {
                       : Rect.fromPoints(_marqueeStart!, _marqueeCurrent!),
                   selectedSolid: widget.selectedSolid,
                   accentColor: p.accent,
+                  selection: widget.selection,
                 ),
               ),
             ),
@@ -864,6 +926,7 @@ class _WorldPainter extends CustomPainter {
     required this.marquee,
     required this.selectedSolid,
     required this.accentColor,
+    required this.selection,
   });
 
   final World world;
@@ -887,6 +950,7 @@ class _WorldPainter extends CustomPainter {
   final Rect? marquee;
   final int selectedSolid;
   final Color accentColor;
+  final CellRect? selection;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -915,6 +979,7 @@ class _WorldPainter extends CustomPainter {
     canvas.translate(offset.dx, offset.dy);
     _paintLinePortals(canvas);
     _paintPortalLinks(canvas);
+    _paintPads(canvas);
     _paintLineDraft(canvas);
     canvas.restore();
 
@@ -930,6 +995,27 @@ class _WorldPainter extends CustomPainter {
           ..color = accentColor
           ..style = PaintingStyle.stroke
           ..strokeWidth = 1,
+      );
+    }
+
+    final CellRect? selectedBox = selection;
+    if (selectedBox != null) {
+      final Rect rect = Rect.fromLTWH(
+        selectedBox.x * scale + offset.dx,
+        selectedBox.y * scale + offset.dy,
+        selectedBox.w * scale,
+        selectedBox.h * scale,
+      );
+      canvas.drawRect(
+        rect,
+        Paint()..color = accentColor.withValues(alpha: 0.12),
+      );
+      canvas.drawRect(
+        rect,
+        Paint()
+          ..color = accentColor
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2,
       );
     }
   }
@@ -958,6 +1044,40 @@ class _WorldPainter extends CustomPainter {
       accentColor: accentColor,
       drawBackground: false,
     ).paint(canvas, size);
+  }
+
+  void _paintPads(Canvas canvas) {
+    final List<Pad> pads = parsePads(world.raw['pads']);
+    final Paint fill = Paint()..color = const Color(0xFFD9A441);
+    final Paint stroke = Paint()
+      ..color = const Color(0xFF8A5A1A)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1;
+    for (final Pad pad in pads) {
+      final Segment? segment = world.segmentById(pad.segment);
+      if (segment == null) continue;
+      final Offset center = Offset(
+        (segment.spec.originCol + pad.col + 0.5) * scale,
+        (segment.spec.originRow + pad.row + 0.5) * scale,
+      );
+      final double radius = (scale * 0.32).clamp(3.0, 14.0);
+      canvas.drawCircle(center, radius, fill);
+      canvas.drawCircle(center, radius, stroke);
+      if (scale >= 12) {
+        final TextPainter tp = TextPainter(
+          text: TextSpan(
+            text: pad.id,
+            style: TextStyle(
+              color: const Color(0xFFD9A441),
+              fontSize: (scale * 0.3).clamp(7.0, 11.0),
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          textDirection: TextDirection.ltr,
+        )..layout();
+        tp.paint(canvas, center - Offset(tp.width / 2, radius + tp.height));
+      }
+    }
   }
 
   void _paintLineDraft(Canvas canvas) {

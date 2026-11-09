@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart' show DefaultMaterialLocalizations;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -5,14 +7,36 @@ import 'package:jo_draftui/jo_draftui.dart';
 
 import 'config.dart';
 import 'ui/editor_page.dart';
+import 'ui/legacy_preview_loader.dart';
+import 'ui/world_preview_page.dart';
 
-void main() {
+void main(List<String> args) {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const MapEditorApp());
+  runApp(MapEditorApp(
+    previewPath: _argValue(args, '--preview='),
+    legacyPreviewPath: _argValue(args, '--legacy-preview='),
+    legacyEditPath: _argValue(args, '--legacy-edit='),
+  ));
+}
+
+String? _argValue(List<String> args, String prefix) {
+  for (final arg in args) {
+    if (arg.startsWith(prefix)) return arg.substring(prefix.length);
+  }
+  return null;
 }
 
 class MapEditorApp extends StatefulWidget {
-  const MapEditorApp({super.key});
+  const MapEditorApp({
+    super.key,
+    this.previewPath,
+    this.legacyPreviewPath,
+    this.legacyEditPath,
+  });
+
+  final String? previewPath;
+  final String? legacyPreviewPath;
+  final String? legacyEditPath;
 
   @override
   State<MapEditorApp> createState() => _MapEditorAppState();
@@ -74,7 +98,23 @@ class _MapEditorAppState extends State<MapEditorApp> {
                 OverlayEntry(
                   builder: (_) => ColoredBox(
                     color: palette.bg,
-                    child: const EditorPage(),
+                    child: widget.previewPath != null
+                        ? WorldPreviewPage(
+                            initialPath: widget.previewPath,
+                            onClose: () => exit(0),
+                          )
+                        : widget.legacyPreviewPath != null
+                            ? LegacyPreviewLoader(
+                                path: widget.legacyPreviewPath!,
+                                onClose: () => exit(0),
+                              )
+                            : widget.legacyEditPath != null
+                                ? LegacyPreviewLoader(
+                                    path: widget.legacyEditPath!,
+                                    editable: true,
+                                    onClose: () => exit(0),
+                                  )
+                                : const EditorPage(),
                   ),
                 ),
               ],

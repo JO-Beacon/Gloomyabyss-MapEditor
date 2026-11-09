@@ -13,6 +13,7 @@ import '../models/pad.dart';
 import '../models/line_portal.dart';
 import '../models/terrain.dart';
 import '../models/world.dart';
+import '../world/geometry.dart';
 
 class _CellChange {
   _CellChange(this.segment, this.col, this.row, this.before, this.after);
@@ -25,12 +26,53 @@ class _CellChange {
 }
 
 class _Action {
-  _Action({required this.undo, required this.redo, this.tag, this.label = ''});
+  _Action({
+    required this.undo,
+    required this.redo,
+    this.tag,
+    this.label = '',
+    this.selectionBefore,
+    this.selectionAfter,
+    this.selectionChanged = false,
+  });
 
   final VoidCallback undo;
   final VoidCallback redo;
   final String? tag;
   final String label;
+  final CellRect? selectionBefore;
+  final CellRect? selectionAfter;
+  final bool selectionChanged;
+}
+
+/// 复制缓冲区里的一个道具/对象。
+class ClipboardEntity {
+  const ClipboardEntity({
+    required this.kind,
+    required this.type,
+    required this.dx,
+    required this.dy,
+  });
+
+  final String kind; // prop / object
+  final String type;
+  final int dx;
+  final int dy;
+}
+
+/// 矩形选区的复制内容。
+class MapClipboard {
+  const MapClipboard({
+    required this.width,
+    required this.height,
+    required this.rows,
+    required this.entities,
+  });
+
+  final int width;
+  final int height;
+  final List<String> rows;
+  final List<ClipboardEntity> entities;
 }
 
 /// 可变的“新值”容器，给重命名合并用。
@@ -52,6 +94,28 @@ class EditorState extends ChangeNotifier {
 
   /// 有没有未保存的改动。
   bool dirty = false;
+
+  /// 新格式世界的保存入口；非空时 [save] 走这个，而不是旧格式的 WorldIo。
+  Future<void> Function()? newFormatSaveHandler;
+
+  /// 新格式世界另存为 .gmap 的入口。
+  Future<void> Function()? newFormatGmapExportHandler;
+
+  /// 外部保存器修改状态后，通知 UI 刷新。
+  void notifyChanged() => notifyListeners();
+
+  /// 当前矩形选区（世界坐标）。
+  CellRect? selection;
+
+  /// 矩形选区的复制缓冲区。
+  MapClipboard? clipboard;
+
+  bool get hasClipboard => clipboard != null;
+
+  void setSelection(CellRect? rect) {
+    selection = rect;
+    notifyListeners();
+  }
 
   /// 当前编辑的是 .gmap 时的文件路径；为 null 表示文件夹模式。
   String? gmapPath;
@@ -471,6 +535,9 @@ class EditorState extends ChangeNotifier {
 
   bool solidPick = false;
   int selectedSolid = -1;
+
+  /// 编辑新格式世界时为 true：新画的碰撞线会带上组 id。
+  bool newFormatEditing = false;
   final List<(int, int)> _solidDraft = [];
 
   List<(int, int)> get solidDraft => List<(int, int)>.unmodifiable(_solidDraft);
@@ -1046,6 +1113,7 @@ class EditorState extends ChangeNotifier {
     _renameIndex = -1;
     final action = _undo.removeLast();
     action.undo();
+    if (action.selectionChanged) selection = action.selectionBefore;
     _redo.add(action);
     notifyListeners();
   }
@@ -1056,6 +1124,7 @@ class EditorState extends ChangeNotifier {
     _renameIndex = -1;
     final action = _redo.removeLast();
     action.redo();
+    if (action.selectionChanged) selection = action.selectionAfter;
     _undo.add(action);
     notifyListeners();
   }
@@ -1438,6 +1507,19 @@ class EditorState extends ChangeNotifier {
   void _addPadAt(int col, int row) {
     final s = segment;
     if (s == null) return;
+    final w = world;
+    final globalCol = s.spec.originCol + col;
+    final globalRow = s.spec.originRow + row;
+    final conflict = pads.any((pad) {
+      final other = w?.segmentById(pad.segment);
+      if (other == null || other.spec.originZ != s.spec.originZ) return false;
+      return other.spec.originCol + pad.col == globalCol &&
+          other.spec.originRow + pad.row == globalRow;
+    });
+    if (conflict) {
+      setError('这个格子已经有传送格了');
+      return;
+    }
     final id = _nextPadId();
     _editLists('加传送格', (pads, padLinks) {
       pads.add(<String, dynamic>{
@@ -1650,6 +1732,20 @@ class EditorState extends ChangeNotifier {
     return out.isEmpty ? null : out;
   }
 
+  String _nextSolidGroupId() {
+    final ids = <String>{};
+    for (final seg in world?.segments ?? const <Segment>[]) {
+      for (final solid in parseSolids(seg.instructions)) {
+        if (solid.group != null) ids.add(solid.group!);
+      }
+    }
+    var n = 1;
+    while (ids.contains('solid_$n')) {
+      n++;
+    }
+    return 'solid_$n';
+  }
+
   void finishSolid() {
     final s = segment;
     if (s == null || _solidDraft.length < 3) return;
@@ -1662,8 +1758,12 @@ class EditorState extends ChangeNotifier {
       return;
     }
 
+    final String? group = newFormatEditing ? _nextSolidGroupId() : null;
     final lines = pieces
-        .map((poly) => '; solid=${poly.map((p) => '${p.$1},${p.$2}').join(', ')}')
+        .map((poly) {
+          final coords = poly.map((p) => '${p.$1},${p.$2}').join(', ');
+          return group == null ? '; solid=$coords' : '; solid=@$group,$coords';
+        })
         .toList(growable: false);
     final index = s.instructions.length;
     s.instructions.addAll(lines);
@@ -1690,13 +1790,42 @@ class EditorState extends ChangeNotifier {
     if (s == null || instructionIndex < 0 || instructionIndex >= s.instructions.length) {
       return;
     }
-    final line = s.instructions.removeAt(instructionIndex);
+    final list = solids;
+    SolidShape? target;
+    for (final shape in list) {
+      if (shape.instructionIndex == instructionIndex) {
+        target = shape;
+        break;
+      }
+    }
+    final removed = <(int, String)>[];
+    if (target?.group != null) {
+      for (final shape in list) {
+        if (shape.group != target!.group) continue;
+        if (shape.instructionIndex < s.instructions.length) {
+          removed.add((shape.instructionIndex, s.instructions[shape.instructionIndex]));
+        }
+      }
+    } else {
+      removed.add((instructionIndex, s.instructions[instructionIndex]));
+    }
+    removed.sort((a, b) => b.$1.compareTo(a.$1));
+    for (final entry in removed) {
+      s.instructions.removeAt(entry.$1);
+    }
     _push(_Action(
-      label: '删碰撞',
-      undo: () => s.instructions.insert(instructionIndex, line),
+      label: target?.group == null ? '删碰撞' : '删碰撞组',
+      undo: () {
+        for (final entry in removed.reversed) {
+          s.instructions.insert(entry.$1, entry.$2);
+        }
+      },
       redo: () {
-        final i = s.instructions.indexOf(line);
-        if (i >= 0) s.instructions.removeAt(i);
+        for (final entry in removed) {
+          if (entry.$1 < s.instructions.length) {
+            s.instructions.removeAt(entry.$1);
+          }
+        }
       },
     ));
     notifyListeners();
@@ -1947,6 +2076,235 @@ class EditorState extends ChangeNotifier {
 
   Future<void> exportGmap() => saveAsGmap();
 
+  // —— 矩形选区：复制 / 粘贴 / 删除 / 移动
+
+  List<String> _copyRows(Segment s, CellRect rect) {
+    final rows = <String>[];
+    final lx = rect.x - s.spec.originCol;
+    final ly = rect.y - s.spec.originRow;
+    for (var y = 0; y < rect.h; y++) {
+      final line = StringBuffer();
+      for (var x = 0; x < rect.w; x++) {
+        final sx = lx + x;
+        final sy = ly + y;
+        line.write(
+          sx >= 0 && sy >= 0 && sx < s.width && sy < s.height
+              ? s.charAt(sx, sy)
+              : ' ',
+        );
+      }
+      rows.add(line.toString());
+    }
+    return rows;
+  }
+
+  MapClipboard _makeClipboard(Segment s, CellRect rect) {
+    final entities = <ClipboardEntity>[];
+    for (final prop in parsePlacedProps(s.instructions)) {
+      final col = s.spec.originCol + prop.col;
+      final row = s.spec.originRow + prop.row;
+      if (rect.containsCell(col, row)) {
+        entities.add(ClipboardEntity(
+          kind: 'prop',
+          type: prop.id,
+          dx: col - rect.x,
+          dy: row - rect.y,
+        ));
+      }
+    }
+    for (final object in parsePlacedObjects(s.instructions)) {
+      final col = s.spec.originCol + object.col;
+      final row = s.spec.originRow + object.row;
+      if (rect.containsCell(col, row)) {
+        entities.add(ClipboardEntity(
+          kind: 'object',
+          type: object.id,
+          dx: col - rect.x,
+          dy: row - rect.y,
+        ));
+      }
+    }
+    return MapClipboard(
+      width: rect.w,
+      height: rect.h,
+      rows: _copyRows(s, rect),
+      entities: entities,
+    );
+  }
+
+  void copyRegion(CellRect rect) {
+    final s = segment;
+    if (s == null) return;
+    clipboard = _makeClipboard(s, rect);
+    notice = '已复制 ${rect.w}×${rect.h} 区域';
+    notifyListeners();
+  }
+
+  void _deleteRegionRaw(Segment s, CellRect rect) {
+    final lx = rect.x - s.spec.originCol;
+    final ly = rect.y - s.spec.originRow;
+    for (var y = 0; y < rect.h; y++) {
+      for (var x = 0; x < rect.w; x++) {
+        final sx = lx + x;
+        final sy = ly + y;
+        if (sx >= 0 && sy >= 0 && sx < s.width && sy < s.height) {
+          s.setChar(sx, sy, ' ');
+        }
+      }
+    }
+    s.instructions.removeWhere((line) {
+      final props = parsePlacedProps(<String>[line]);
+      final objects = parsePlacedObjects(<String>[line]);
+      for (final p in props) {
+        final col = s.spec.originCol + p.col;
+        final row = s.spec.originRow + p.row;
+        if (rect.containsCell(col, row)) return true;
+      }
+      for (final o in objects) {
+        final col = s.spec.originCol + o.col;
+        final row = s.spec.originRow + o.row;
+        if (rect.containsCell(col, row)) return true;
+      }
+      return false;
+    });
+  }
+
+  void deleteRegion(CellRect rect) {
+    final s = segment;
+    if (s == null) return;
+    final beforeRows = List<String>.from(s.rows);
+    final beforeInstructions = List<String>.from(s.instructions);
+    _deleteRegionRaw(s, rect);
+    final afterRows = List<String>.from(s.rows);
+    final afterInstructions = List<String>.from(s.instructions);
+    selection = null;
+    _push(_Action(
+      label: '删除选区',
+      selectionBefore: rect,
+      selectionAfter: null,
+      selectionChanged: true,
+      undo: () {
+        s.rows
+          ..clear()
+          ..addAll(beforeRows);
+        s.instructions
+          ..clear()
+          ..addAll(beforeInstructions);
+      },
+      redo: () {
+        s.rows
+          ..clear()
+          ..addAll(afterRows);
+        s.instructions
+          ..clear()
+          ..addAll(afterInstructions);
+      },
+    ));
+    notifyListeners();
+  }
+
+  void _pasteRaw(Segment s, CellRect dest, MapClipboard cb) {
+    final lx = dest.x - s.spec.originCol;
+    final ly = dest.y - s.spec.originRow;
+    for (var y = 0; y < cb.height; y++) {
+      for (var x = 0; x < cb.width; x++) {
+        final sx = lx + x;
+        final sy = ly + y;
+        if (sx >= 0 && sy >= 0 && sx < s.width && sy < s.height) {
+          s.setChar(sx, sy, cb.rows[y][x]);
+        }
+      }
+    }
+    for (final entity in cb.entities) {
+      final col = dest.x + entity.dx;
+      final row = dest.y + entity.dy;
+      final localCol = col - s.spec.originCol;
+      final localRow = row - s.spec.originRow;
+      if (localCol < 0 || localRow < 0 ||
+          localCol >= s.width || localRow >= s.height) {
+        continue;
+      }
+      s.instructions.add(
+        entity.kind == 'prop'
+            ? '; prop=${entity.type},$localCol,$localRow'
+            : '; spawn=${entity.type},$localCol,$localRow',
+      );
+    }
+  }
+
+  void pasteClipboard(CellRect dest) {
+    final s = segment;
+    final cb = clipboard;
+    if (s == null || cb == null) return;
+    final beforeSelection = selection;
+    final beforeRows = List<String>.from(s.rows);
+    final beforeInstructions = List<String>.from(s.instructions);
+    _pasteRaw(s, dest, cb);
+    final afterRows = List<String>.from(s.rows);
+    final afterInstructions = List<String>.from(s.instructions);
+    selection = dest;
+    _push(_Action(
+      label: '粘贴选区',
+      selectionBefore: beforeSelection,
+      selectionAfter: dest,
+      selectionChanged: true,
+      undo: () {
+        s.rows
+          ..clear()
+          ..addAll(beforeRows);
+        s.instructions
+          ..clear()
+          ..addAll(beforeInstructions);
+      },
+      redo: () {
+        s.rows
+          ..clear()
+          ..addAll(afterRows);
+        s.instructions
+          ..clear()
+          ..addAll(afterInstructions);
+      },
+    ));
+    notifyListeners();
+  }
+
+  void moveRegion(CellRect rect, int dc, int dr) {
+    final s = segment;
+    if (s == null) return;
+    final cb = _makeClipboard(s, rect);
+    final beforeRows = List<String>.from(s.rows);
+    final beforeInstructions = List<String>.from(s.instructions);
+    _deleteRegionRaw(s, rect);
+    _pasteRaw(s, rect.translated(dc, dr), cb);
+    final afterRows = List<String>.from(s.rows);
+    final afterInstructions = List<String>.from(s.instructions);
+    final afterSelection = rect.translated(dc, dr);
+    selection = afterSelection;
+    _push(_Action(
+      label: '移动选区',
+      selectionBefore: rect,
+      selectionAfter: afterSelection,
+      selectionChanged: true,
+      undo: () {
+        s.rows
+          ..clear()
+          ..addAll(beforeRows);
+        s.instructions
+          ..clear()
+          ..addAll(beforeInstructions);
+      },
+      redo: () {
+        s.rows
+          ..clear()
+          ..addAll(afterRows);
+        s.instructions
+          ..clear()
+          ..addAll(afterInstructions);
+      },
+    ));
+    notifyListeners();
+  }
+
   // —— 校验 / 保存
 
   void validate() {
@@ -1960,6 +2318,12 @@ class EditorState extends ChangeNotifier {
   Future<void> save() async {
     final w = world;
     if (w == null) return;
+
+    final newFormatSave = newFormatSaveHandler;
+    if (newFormatSave != null) {
+      await newFormatSave();
+      return;
+    }
 
     if (gmapPath != null) {
       final snapshot = WorldIo.snapshot(w);
@@ -1988,6 +2352,16 @@ class EditorState extends ChangeNotifier {
   Future<void> saveAsGmap() async {
     final w = world;
     if (w == null) return;
+    final gmapExport = newFormatGmapExportHandler;
+    if (gmapExport != null) {
+      await gmapExport();
+      return;
+    }
+    if (newFormatSaveHandler != null) {
+      notice = '当前新格式世界不支持另存为 .gmap';
+      notifyListeners();
+      return;
+    }
 
     final snapshot = WorldIo.snapshot(w);
     final bytes = GmapFile.encode(<String, Uint8List>{
