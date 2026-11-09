@@ -9,6 +9,9 @@ const bool kDeveloperModeDefault = false;
 /// 运行期设置，落盘到用户目录，重启后保留。
 class AppSettings extends ChangeNotifier {
   bool developerMode = kDeveloperModeDefault;
+
+  /// 是否显示已弃用的历史功能入口。
+  bool legacyFeatures = false;
   bool dark = true;
   double leftWidth = 220;
   double rightWidth = 300;
@@ -40,6 +43,7 @@ class AppSettings extends ChangeNotifier {
       final Object? decoded = jsonDecode(_file.readAsStringSync());
       if (decoded is! Map) return;
       developerMode = decoded['developer_mode'] == true;
+      legacyFeatures = decoded['legacy_features'] == true;
       dark = decoded['dark'] != false;
       leftWidth = ((decoded['left_width'] as num?) ?? 220).toDouble();
       rightWidth = ((decoded['right_width'] as num?) ?? 300).toDouble();
@@ -63,6 +67,7 @@ class AppSettings extends ChangeNotifier {
       _file.parent.createSync(recursive: true);
       _file.writeAsStringSync(jsonEncode(<String, Object>{
         'developer_mode': developerMode,
+        'legacy_features': legacyFeatures,
         'dark': dark,
         'left_width': leftWidth,
         'right_width': rightWidth,
@@ -77,6 +82,12 @@ class AppSettings extends ChangeNotifier {
 
   void setDeveloperMode(bool value) {
     developerMode = value;
+    _save();
+    notifyListeners();
+  }
+
+  void setLegacyFeatures(bool value) {
+    legacyFeatures = value;
     _save();
     notifyListeners();
   }
@@ -120,7 +131,7 @@ class AppSettings extends ChangeNotifier {
 final AppSettings appSettings = AppSettings();
 
 /// 编辑器版本。
-const String kAppVersion = '0.1.0';
+const String kAppVersion = '0.2.0';
 
 /// 项目主页；检查更新会打开它的 releases 页面。
 const String kProjectUrl = 'https://github.com/JO-Beacon/Gloomyabyss-MapEditor';

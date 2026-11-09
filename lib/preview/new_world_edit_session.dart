@@ -2,6 +2,7 @@
 library;
 
 import '../state/editor_state.dart';
+import 'gmap_export.dart';
 import 'new_world_save.dart';
 import 'preview_world.dart';
 
@@ -22,10 +23,19 @@ class NewWorldEditSession {
     try {
       final result = _saveSession.save();
       _saveSession.syncWorldSolids();
+      if (preview.gmapPath != null) {
+        GmapExport.saveDirectoryToGmap(
+          root: preview.worldPath,
+          gmapPath: preview.gmapPath!,
+          extraEntries: preview.gmapExtraEntries,
+        );
+      }
       state
         ..dirty = false
         ..selectedSolid = -1
-        ..notice = '已保存到新格式（revision ${result.revision}）';
+        ..notice = preview.gmapPath == null
+            ? '已保存到 v2 世界（revision ${result.revision}）'
+            : '已保存到 .gmap（revision ${result.revision}）';
       state.notifyChanged();
     } catch (error) {
       state

@@ -29,34 +29,52 @@ void main() {
       ..selectedLevel = 0;
   }
 
-  test('矩形复制、粘贴、删除', () {
+  test('地形复制、粘贴、删除不碰道具', () {
     final state = makeState();
     final segment = state.segment!;
     state.copyRegion(const CellRect(0, 0, 2, 2));
+    expect(state.clipboard!.kind, EditKind.terrain);
     expect(state.clipboard!.width, 2);
     expect(state.clipboard!.rows[0], '.#');
-    expect(state.clipboard!.entities.length, 1);
+    expect(state.clipboard!.entities, isEmpty);
 
     state.pasteClipboard(const CellRect(2, 0, 2, 2));
     expect(segment.rows[0], '.#.#');
-    expect(segment.instructions, contains('; prop=box,3,1'));
+    expect(segment.instructions, contains('; prop=box,1,1'));
+    expect(segment.instructions.where((line) => line.contains('box,3,1')), isEmpty);
 
     state.deleteRegion(const CellRect(2, 0, 2, 2));
     expect(segment.rows[0][2], ' ');
+    expect(segment.instructions, contains('; prop=box,1,1'));
+  });
+
+  test('道具复制、粘贴、删除不碰地形', () {
+    final state = makeState();
+    final segment = state.segment!;
+    state.copyRegion(const CellRect(0, 0, 2, 2), kind: EditKind.prop);
+    expect(state.clipboard!.kind, EditKind.prop);
+    expect(state.clipboard!.rows, isEmpty);
+    expect(state.clipboard!.entities.length, 1);
+
+    state.pasteClipboard(const CellRect(2, 0, 2, 2), kind: EditKind.prop);
+    expect(segment.rows, <String>['.#..', '....', '....', '....']);
+    expect(segment.instructions, contains('; prop=box,3,1'));
+
+    state.deleteRegion(const CellRect(2, 0, 2, 2), kind: EditKind.prop);
+    expect(segment.instructions, contains('; prop=box,1,1'));
     expect(segment.instructions.where((line) => line.contains('box,3,1')), isEmpty);
   });
 
-  test('移动选区只产生一步撤销', () {
+  test('移动选区只产生一步撤销并恢复选区', () {
     final state = makeState();
     final segment = state.segment!;
-    final before = List<String>.from(segment.rows);
-    state.moveRegion(const CellRect(0, 0, 2, 2), 2, 0);
+    state.moveRegion(const CellRect(0, 0, 2, 2), 2, 0, kind: EditKind.terrain);
     expect(segment.rows[0][0], ' ');
     expect(segment.rows[0][2], '.');
     expect(state.selection, const CellRect(2, 0, 2, 2));
     expect(state.undoDepth, 1);
     state.undo();
-    expect(segment.rows, before);
+    expect(segment.rows, <String>['.#..', '....', '....', '....']);
     expect(state.selection, const CellRect(0, 0, 2, 2));
     expect(segment.instructions, contains('; prop=box,1,1'));
   });

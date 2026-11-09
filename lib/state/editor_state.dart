@@ -60,15 +60,20 @@ class ClipboardEntity {
   final int dy;
 }
 
+/// 当前矩形选区操作的数据类型。
+enum EditKind { terrain, prop, object }
+
 /// 矩形选区的复制内容。
 class MapClipboard {
   const MapClipboard({
+    required this.kind,
     required this.width,
     required this.height,
     required this.rows,
     required this.entities,
   });
 
+  final EditKind kind;
   final int width;
   final int height;
   final List<String> rows;
@@ -1383,6 +1388,22 @@ class EditorState extends ChangeNotifier {
     selectSolidAtCell(col - s.spec.originCol, row - s.spec.originRow);
   }
 
+  void eraseSolidWorld(int col, int row) {
+    final int i = segmentIndexAtWorld(col, row);
+    if (i < 0) return;
+    final Segment s = world!.segments[i];
+    final int lc = col - s.spec.originCol;
+    final int lr = row - s.spec.originRow;
+    final list = parseSolids(s.instructions);
+    for (final shape in list) {
+      if (_pointInPolygon(lc + 0.5, lr + 0.5, shape.points)) {
+        selectedSegment = i;
+        removeSolid(shape.instructionIndex);
+        return;
+      }
+    }
+  }
+
   void addPadWorld(int col, int row) {
     if (!_activateWorldCell(col, row)) return;
     final Segment s = segment!;
@@ -1620,6 +1641,16 @@ class EditorState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 画碰撞时右键：删除最后一个已放下的顶点。
+  void removeLastSolidPoint() {
+    if (!solidPick || _solidDraft.isEmpty) return;
+    _solidDraft.removeLast();
+    notice = _solidDraft.isEmpty
+        ? '已删除最后一个顶点，继续点第一个顶点'
+        : '已删除最后一个顶点，剩 ${_solidDraft.length} 个';
+    notifyListeners();
+  }
+
   /// 点一个顶点；点回第一个点时闭合。
   void pickSolidCell(int col, int row) {
     if (!solidPick) return;
@@ -1781,7 +1812,9 @@ class EditorState extends ChangeNotifier {
     final bool split = lines.length > 1;
     _solidDraft.clear();
     solidPick = false;
-    notice = split ? '凹多边形已拆成 ${lines.length} 个三角形' : '已添加碰撞';
+    notice = split
+        ? '凹多边形已拆成 ${lines.length} 个三角形'
+        : '已添加碰撞';
     notifyListeners();
   }
 
@@ -2098,83 +2131,98 @@ class EditorState extends ChangeNotifier {
     return rows;
   }
 
-  MapClipboard _makeClipboard(Segment s, CellRect rect) {
+  MapClipboard _makeClipboard(
+    Segment s,
+    CellRect rect,
+    EditKind kind,
+  ) {
     final entities = <ClipboardEntity>[];
-    for (final prop in parsePlacedProps(s.instructions)) {
-      final col = s.spec.originCol + prop.col;
-      final row = s.spec.originRow + prop.row;
-      if (rect.containsCell(col, row)) {
-        entities.add(ClipboardEntity(
-          kind: 'prop',
-          type: prop.id,
-          dx: col - rect.x,
-          dy: row - rect.y,
-        ));
+    if (kind == EditKind.prop) {
+      for (final prop in parsePlacedProps(s.instructions)) {
+        final col = s.spec.originCol + prop.col;
+        final row = s.spec.originRow + prop.row;
+        if (rect.containsCell(col, row)) {
+          entities.add(ClipboardEntity(
+            kind: 'prop',
+            type: prop.id,
+            dx: col - rect.x,
+            dy: row - rect.y,
+          ));
+        }
       }
-    }
-    for (final object in parsePlacedObjects(s.instructions)) {
-      final col = s.spec.originCol + object.col;
-      final row = s.spec.originRow + object.row;
-      if (rect.containsCell(col, row)) {
-        entities.add(ClipboardEntity(
-          kind: 'object',
-          type: object.id,
-          dx: col - rect.x,
-          dy: row - rect.y,
-        ));
+    } else if (kind == EditKind.object) {
+      for (final object in parsePlacedObjects(s.instructions)) {
+        final col = s.spec.originCol + object.col;
+        final row = s.spec.originRow + object.row;
+        if (rect.containsCell(col, row)) {
+          entities.add(ClipboardEntity(
+            kind: 'object',
+            type: object.id,
+            dx: col - rect.x,
+            dy: row - rect.y,
+          ));
+        }
       }
     }
     return MapClipboard(
+      kind: kind,
       width: rect.w,
       height: rect.h,
-      rows: _copyRows(s, rect),
+      rows: kind == EditKind.terrain ? _copyRows(s, rect) : const <String>[],
       entities: entities,
     );
   }
 
-  void copyRegion(CellRect rect) {
+  void copyRegion(CellRect rect, {EditKind kind = EditKind.terrain}) {
     final s = segment;
     if (s == null) return;
-    clipboard = _makeClipboard(s, rect);
+    clipboard = _makeClipboard(s, rect, kind);
     notice = '已复制 ${rect.w}×${rect.h} 区域';
     notifyListeners();
   }
 
-  void _deleteRegionRaw(Segment s, CellRect rect) {
-    final lx = rect.x - s.spec.originCol;
-    final ly = rect.y - s.spec.originRow;
-    for (var y = 0; y < rect.h; y++) {
-      for (var x = 0; x < rect.w; x++) {
-        final sx = lx + x;
-        final sy = ly + y;
-        if (sx >= 0 && sy >= 0 && sx < s.width && sy < s.height) {
-          s.setChar(sx, sy, ' ');
+  void _deleteRegionRaw(Segment s, CellRect rect, EditKind kind) {
+    if (kind == EditKind.terrain) {
+      final lx = rect.x - s.spec.originCol;
+      final ly = rect.y - s.spec.originRow;
+      for (var y = 0; y < rect.h; y++) {
+        for (var x = 0; x < rect.w; x++) {
+          final sx = lx + x;
+          final sy = ly + y;
+          if (sx >= 0 && sy >= 0 && sx < s.width && sy < s.height) {
+            s.setChar(sx, sy, ' ');
+          }
         }
       }
+      return;
     }
     s.instructions.removeWhere((line) {
-      final props = parsePlacedProps(<String>[line]);
-      final objects = parsePlacedObjects(<String>[line]);
-      for (final p in props) {
-        final col = s.spec.originCol + p.col;
-        final row = s.spec.originRow + p.row;
-        if (rect.containsCell(col, row)) return true;
-      }
-      for (final o in objects) {
-        final col = s.spec.originCol + o.col;
-        final row = s.spec.originRow + o.row;
-        if (rect.containsCell(col, row)) return true;
+      if (kind == EditKind.prop) {
+        for (final p in parsePlacedProps(<String>[line])) {
+          final col = s.spec.originCol + p.col;
+          final row = s.spec.originRow + p.row;
+          if (rect.containsCell(col, row)) return true;
+        }
+      } else if (kind == EditKind.object) {
+        for (final o in parsePlacedObjects(<String>[line])) {
+          final col = s.spec.originCol + o.col;
+          final row = s.spec.originRow + o.row;
+          if (rect.containsCell(col, row)) return true;
+        }
       }
       return false;
     });
   }
 
-  void deleteRegion(CellRect rect) {
+  void deleteRegion(
+    CellRect rect, {
+    EditKind kind = EditKind.terrain,
+  }) {
     final s = segment;
     if (s == null) return;
     final beforeRows = List<String>.from(s.rows);
     final beforeInstructions = List<String>.from(s.instructions);
-    _deleteRegionRaw(s, rect);
+    _deleteRegionRaw(s, rect, kind);
     final afterRows = List<String>.from(s.rows);
     final afterInstructions = List<String>.from(s.instructions);
     selection = null;
@@ -2204,14 +2252,16 @@ class EditorState extends ChangeNotifier {
   }
 
   void _pasteRaw(Segment s, CellRect dest, MapClipboard cb) {
-    final lx = dest.x - s.spec.originCol;
-    final ly = dest.y - s.spec.originRow;
-    for (var y = 0; y < cb.height; y++) {
-      for (var x = 0; x < cb.width; x++) {
-        final sx = lx + x;
-        final sy = ly + y;
-        if (sx >= 0 && sy >= 0 && sx < s.width && sy < s.height) {
-          s.setChar(sx, sy, cb.rows[y][x]);
+    if (cb.kind == EditKind.terrain) {
+      final lx = dest.x - s.spec.originCol;
+      final ly = dest.y - s.spec.originRow;
+      for (var y = 0; y < cb.height; y++) {
+        for (var x = 0; x < cb.width; x++) {
+          final sx = lx + x;
+          final sy = ly + y;
+          if (sx >= 0 && sy >= 0 && sx < s.width && sy < s.height) {
+            s.setChar(sx, sy, cb.rows[y][x]);
+          }
         }
       }
     }
@@ -2232,10 +2282,14 @@ class EditorState extends ChangeNotifier {
     }
   }
 
-  void pasteClipboard(CellRect dest) {
+  void pasteClipboard(
+    CellRect dest, {
+    EditKind? kind,
+  }) {
     final s = segment;
     final cb = clipboard;
     if (s == null || cb == null) return;
+    if (kind != null && kind != cb.kind) return;
     final beforeSelection = selection;
     final beforeRows = List<String>.from(s.rows);
     final beforeInstructions = List<String>.from(s.instructions);
@@ -2268,13 +2322,18 @@ class EditorState extends ChangeNotifier {
     notifyListeners();
   }
 
-  void moveRegion(CellRect rect, int dc, int dr) {
+  void moveRegion(
+    CellRect rect,
+    int dc,
+    int dr, {
+    EditKind kind = EditKind.terrain,
+  }) {
     final s = segment;
     if (s == null) return;
-    final cb = _makeClipboard(s, rect);
+    final cb = _makeClipboard(s, rect, kind);
     final beforeRows = List<String>.from(s.rows);
     final beforeInstructions = List<String>.from(s.instructions);
-    _deleteRegionRaw(s, rect);
+    _deleteRegionRaw(s, rect, kind);
     _pasteRaw(s, rect.translated(dc, dr), cb);
     final afterRows = List<String>.from(s.rows);
     final afterInstructions = List<String>.from(s.instructions);

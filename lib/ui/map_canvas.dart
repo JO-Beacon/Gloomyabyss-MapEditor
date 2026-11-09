@@ -60,6 +60,9 @@ class MapCanvas extends StatefulWidget {
     this.selection,
     this.onSelectionChanged,
     this.onMoveSelection,
+    this.onCancelLinePortal,
+    this.onRemoveLastSolidPoint,
+    this.selectionEnabled = true,
   });
 
   final World world;
@@ -126,6 +129,15 @@ class MapCanvas extends StatefulWidget {
 
   /// 拖动选区移动时的世界坐标偏移。
   final void Function(int dc, int dr)? onMoveSelection;
+
+  /// 传送门画到一半时右键取消。
+  final VoidCallback? onCancelLinePortal;
+
+  /// 碰撞画到一半时右键删除最后一个顶点。
+  final VoidCallback? onRemoveLastSolidPoint;
+
+  /// 当前页签是否允许矩形框选。
+  final bool selectionEnabled;
 
   @override
   State<MapCanvas> createState() => _MapCanvasState();
@@ -268,6 +280,18 @@ class _MapCanvasState extends State<MapCanvas> {
               if (event is PointerScrollEvent) _zoom(event);
             },
             onPointerDown: (event) {
+              if (event.buttons & kSecondaryMouseButton != 0 &&
+                  widget.solidMode &&
+                  widget.solidDraft.isNotEmpty) {
+                widget.onRemoveLastSolidPoint?.call();
+                return;
+              }
+              if (event.buttons & kSecondaryMouseButton != 0 &&
+                  widget.linePortalMode &&
+                  widget.linePickStart != null) {
+                widget.onCancelLinePortal?.call();
+                return;
+              }
               if (event.buttons &
                       (kMiddleMouseButton | kSecondaryMouseButton) !=
                   0) {
@@ -332,6 +356,7 @@ class _MapCanvasState extends State<MapCanvas> {
                   return;
                 }
                 if (!widget.paintEnabled) {
+                  if (!widget.selectionEnabled) return;
                   final (int c, int r) = _cellAt(event.localPosition);
                   final CellRect? current = widget.selection;
                   if (current != null && current.containsCell(c, r)) {

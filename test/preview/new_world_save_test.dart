@@ -2,12 +2,14 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:gloomyabyss_map_editor/preview/gmap_export.dart';
 import 'package:gloomyabyss_map_editor/preview/legacy_world_adapter.dart';
 import 'package:gloomyabyss_map_editor/preview/new_world_edit_session.dart';
 import 'package:gloomyabyss_map_editor/preview/new_world_save.dart';
 import 'package:gloomyabyss_map_editor/preview/preview_world.dart';
 import 'package:gloomyabyss_map_editor/state/editor_state.dart';
 import 'package:gloomyabyss_map_editor/world/definitions.dart';
+import 'package:gloomyabyss_map_editor/world/gmap_container.dart';
 
 void main() {
   late Directory source;
@@ -409,6 +411,51 @@ void main() {
     addTearDown(reopened.dispose);
     expect(reopened.index.solidGroups, isEmpty);
     preview.dispose();
+  });
+
+  test('打开 .gmap v2 保存会写回原包', () async {
+    writeOldWorld();
+    final defs = makeDefinitions();
+    final directory = PreviewWorld.loadOrMigrate(
+      path: source.path,
+      definitions: defs,
+    );
+    final gmap = File('${source.path}/roundtrip.gmap')
+      ..writeAsBytesSync(GmapExport.encodeDirectory(directory.worldPath));
+    final preview = PreviewWorld.loadGmapFile(
+      path: gmap.path,
+      definitions: defs,
+    );
+
+    final data = LegacyWorldAdapter.fromPreview(preview);
+    final state = EditorState()
+      ..world = data.world
+      ..terrain = data.terrain
+      ..propTypes = data.propTypes
+      ..objectTypes = data.objectTypes
+      ..selectedLevel = data.selectedLevel
+      ..selectedCode = '~'
+      ..selectedSegment = 0;
+    state.newFormatSaveHandler = NewWorldEditSession(
+      preview: preview,
+      state: state,
+    ).save;
+
+    state.paintWorld(0, 0);
+    await state.save();
+
+    final container = GmapContainer.decode(gmap.readAsBytesSync());
+    expect(container.version, 2);
+    final reopened = PreviewWorld.loadGmapFile(
+      path: gmap.path,
+      definitions: defs,
+    );
+    addTearDown(reopened.dispose);
+    expect(reopened.terrainCodeAt(0, 0, 0), '~');
+    expect(reopened.index.portals.length, 1);
+
+    preview.dispose();
+    directory.dispose();
   });
 
   test('V5 新画的跨块碰撞会被切分', () async {

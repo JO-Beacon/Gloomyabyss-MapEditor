@@ -210,6 +210,16 @@ class NewWorldSaveSession {
       );
     }
 
+    final rawStart = world.raw['start'];
+    final start = rawStart is Map &&
+            rawStart['col'] is num &&
+            rawStart['row'] is num
+        ? WorldStart(
+            col: (rawStart['col'] as num).toInt(),
+            row: (rawStart['row'] as num).toInt(),
+            z: _meta.start.z,
+          )
+        : _meta.start;
     final newMeta = WorldMeta(
       version: _meta.version,
       name: _meta.name,
@@ -217,7 +227,7 @@ class NewWorldSaveSession {
       chunkFormatVersion: _meta.chunkFormatVersion,
       definitions: _meta.definitions,
       indexRevision: _meta.indexRevision,
-      start: _meta.start,
+      start: start,
       pads: pads,
       padLinks: padLinks,
       portalLinks: portalLinks,

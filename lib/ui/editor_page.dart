@@ -83,6 +83,13 @@ class _EditorPageState extends State<EditorPage> {
   int _prefsTab = 0;
   final Map<int, int> _toolByTab = <int, int>{}; // 每个页签各自的工具，不落盘
   int get _currentTool => _toolByTab[_panelTab] ?? 0;
+
+  EditKind? get _selectionKind => switch (_panelTab) {
+        0 => EditKind.terrain,
+        1 => EditKind.prop,
+        2 => EditKind.object,
+        _ => null,
+      };
   String? _portalLinkTo;
   String _portalLinkFace = 'A';
   int _selectedPortalLink = -1;
@@ -138,7 +145,7 @@ class _EditorPageState extends State<EditorPage> {
 
   Future<void> _openLegacyPreview() async {
     final path = await FilePicker.getDirectoryPath(
-      dialogTitle: '选择新格式世界目录',
+      dialogTitle: '选择 v2 世界目录',
     );
     if (path == null || path.isEmpty) return;
     await _openPreviewPath(path);
@@ -154,8 +161,8 @@ class _EditorPageState extends State<EditorPage> {
       if (preview.temporaryDirectory != null) {
         preview.dispose();
         throw const FormatException(
-          '这里只能打开新格式目录（含 world.meta.json）。'
-          '旧格式请先用“迁移旧版”生成副本。',
+          '这里只能打开 v2 世界目录（含 world.meta.json）。'
+          'v1 格式请先用“迁移 v1 世界目录”生成副本。',
         );
       }
       await _installPreview(preview, notice: notice);
@@ -188,7 +195,7 @@ class _EditorPageState extends State<EditorPage> {
         );
         await _installPreview(
           preview,
-          notice: '已打开 .gmap v2 临时副本；编辑不会写回源包',
+          notice: '已打开 .gmap v2；保存会写回源包',
         );
         return;
       }
@@ -219,7 +226,7 @@ class _EditorPageState extends State<EditorPage> {
         );
         await _installPreview(
           preview,
-          notice: '旧版 .gmap 已迁移为 $output；'
+          notice: 'v1 .gmap 已迁移为 $output；'
               '${result.report.segmentCount} 段，${result.report.chunkCount} 块',
         );
         return;
@@ -247,8 +254,8 @@ class _EditorPageState extends State<EditorPage> {
       ..newFormatEditing = true
       ..notice = notice ??
           (preview.temporaryDirectory == null
-              ? 'V7 编辑：地形/道具/对象/传送门/传送格/碰撞'
-              : '只读预览：旧格式临时副本');
+              ? null
+              : '只读预览：v1 临时副本');
     final levelSegments = data.world.segments
         .where((s) => s.spec.originZ == data.selectedLevel)
         .toList(growable: false);
@@ -368,7 +375,7 @@ class _EditorPageState extends State<EditorPage> {
       );
       File('$output${Platform.pathSeparator}world.index.json')
           .writeAsStringSync(index.encode(), flush: true);
-      await _openPreviewPath(output, notice: '已新建新格式世界：$name');
+      await _openPreviewPath(output, notice: '已新建 v2 世界：$name');
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -602,36 +609,16 @@ class _EditorPageState extends State<EditorPage> {
     // 复制/粘贴直接用逻辑键判断，避免不同平台 keyLabel 大小写不一致。
     if (HardwareKeyboard.instance.isControlPressed) {
       if (event.logicalKey == LogicalKeyboardKey.keyC) {
-        final selection = state.selection;
-        if (selection != null) {
-          state.copyRegion(selection);
+        if (_selectionKind != null && state.selection != null) {
+          _copySelection();
           return KeyEventResult.handled;
         }
       }
       if (event.logicalKey == LogicalKeyboardKey.keyV) {
-        final clipboard = state.clipboard;
-        if (clipboard != null) {
-          final selection = state.selection;
-          final segment = state.segment;
-          final dest = selection != null
-              ? CellRect(
-                  selection.x,
-                  selection.y,
-                  clipboard.width,
-                  clipboard.height,
-                )
-              : (segment == null
-                  ? null
-                  : CellRect(
-                      segment.spec.originCol,
-                      segment.spec.originRow,
-                      clipboard.width,
-                      clipboard.height,
-                    ));
-          if (dest != null) {
-            state.pasteClipboard(dest);
-            return KeyEventResult.handled;
-          }
+        if (_selectionKind != null &&
+            state.clipboard?.kind == _selectionKind) {
+          _pasteSelection();
+          return KeyEventResult.handled;
         }
       }
     }
@@ -642,9 +629,8 @@ class _EditorPageState extends State<EditorPage> {
     }
 
     if (spec == b['delete']) {
-      final selection = state.selection;
-      if (selection != null) {
-        state.deleteRegion(selection);
+      if (_selectionKind != null && state.selection != null) {
+        _deleteSelection();
         return KeyEventResult.handled;
       }
       if (_panelTab == 5 &&
@@ -665,6 +651,45 @@ class _EditorPageState extends State<EditorPage> {
       return KeyEventResult.handled;
     }
     return KeyEventResult.ignored;
+  }
+
+  void _copySelection() {
+    final kind = _selectionKind;
+    final selection = state.selection;
+    if (kind == null || selection == null) return;
+    state.copyRegion(selection, kind: kind);
+  }
+
+  void _pasteSelection() {
+    final kind = _selectionKind;
+    final clipboard = state.clipboard;
+    if (kind == null || clipboard == null || clipboard.kind != kind) return;
+    final selection = state.selection;
+    final segment = state.segment;
+    final dest = selection != null
+        ? CellRect(
+            selection.x,
+            selection.y,
+            clipboard.width,
+            clipboard.height,
+          )
+        : (segment == null
+            ? null
+            : CellRect(
+                segment.spec.originCol,
+                segment.spec.originRow,
+                clipboard.width,
+                clipboard.height,
+              ));
+    if (dest == null) return;
+    state.pasteClipboard(dest, kind: kind);
+  }
+
+  void _deleteSelection() {
+    final kind = _selectionKind;
+    final selection = state.selection;
+    if (kind == null || selection == null) return;
+    state.deleteRegion(selection, kind: kind);
   }
 
   Widget _menuBar() {
@@ -699,13 +724,25 @@ class _EditorPageState extends State<EditorPage> {
                       _newWorldOpen = true;
                     }),
           ),
-          if (widget.terrainOnly)
-            JoMenuItem('打开 .gmap…', onTap: _openAnyGmap)
-          else
+          JoMenuItem('打开 .gmap…', onTap: _openAnyGmap),
+          if (appSettings.developerMode) ...[
+            JoMenuItem('打开文件夹…', onTap: _openLegacyPreview),
+            JoMenuItem('迁移 v1 世界目录…', onTap: _migrateOldDirectory),
+          ],
+          if (appSettings.legacyFeatures) ...[
             JoMenuItem(
-              '打开旧格式 .gmap…',
+              '打开 v1 .gmap…',
               onTap: () => _runGuarded(state.openGmap),
             ),
+            JoMenuItem(
+              '打开 v1 世界目录…',
+              onTap: () => _runGuarded(state.openRoot),
+            ),
+            JoMenuItem(
+              '导入 v1 .gmap 到世界目录…',
+              onTap: () => _runGuarded(state.importGmap),
+            ),
+          ],
           const JoMenuItem('', divider: true),
           JoMenuItem(
             '保存',
@@ -726,26 +763,24 @@ class _EditorPageState extends State<EditorPage> {
           const JoMenuItem('', divider: true),
           JoMenuItem(
             '复制选区',
-            onTap: state.selection == null
+            onTap: _selectionKind == null || state.selection == null
                 ? null
-                : () => state.copyRegion(state.selection!),
+                : _copySelection,
           ),
           JoMenuItem(
             '粘贴到选区',
-            onTap: state.selection == null || state.clipboard == null
+            onTap: _selectionKind == null ||
+                    state.selection == null ||
+                    state.clipboard == null ||
+                    state.clipboard!.kind != _selectionKind
                 ? null
-                : () {
-                    final cb = state.clipboard!;
-                    state.pasteClipboard(
-                      CellRect(state.selection!.x, state.selection!.y, cb.width, cb.height),
-                    );
-                  },
+                : _pasteSelection,
           ),
           JoMenuItem(
             '删除选区',
-            onTap: state.selection == null
+            onTap: _selectionKind == null || state.selection == null
                 ? null
-                : () => state.deleteRegion(state.selection!),
+                : _deleteSelection,
           ),
           const JoMenuItem('', divider: true),
           JoMenuItem('历史记录…', onTap: () => setState(() => _historyOpen = true)),
@@ -770,18 +805,6 @@ class _EditorPageState extends State<EditorPage> {
             },
           ),
         ]),
-        if (appSettings.developerMode)
-          JoMenu('开发', [
-            JoMenuItem(
-              '打开新格式世界（地形编辑）…',
-              onTap: _openLegacyPreview,
-            ),
-            JoMenuItem('迁移旧版世界目录…', onTap: _migrateOldDirectory),
-            if (!widget.terrainOnly) ...[
-              JoMenuItem('打开世界目录…', onTap: () => _runGuarded(state.openRoot)),
-              JoMenuItem('导入到世界目录…', onTap: () => _runGuarded(state.importGmap)),
-            ],
-          ]),
         JoMenu('帮助', [
           JoMenuItem('检查更新…', onTap: _checkForUpdates),
           JoMenuItem('关于', onTap: () => setState(() => _aboutOpen = true)),
@@ -792,6 +815,9 @@ class _EditorPageState extends State<EditorPage> {
 
   Widget _toolbar(JoPalette p) {
     final segment = state.segment;
+    final solidDrawing =
+        _panelTab == 5 && state.solidPick && state.solidDraft.isNotEmpty;
+    final portalDrawing = _panelTab == 3 && state.linePortalPick;
     return Container(
       height: 36,
       color: p.surface,
@@ -830,7 +856,7 @@ class _EditorPageState extends State<EditorPage> {
           JoIconAction(
             icon: JoIcons.file,
             tip: '打开 .gmap',
-            onTap: widget.readOnly || widget.terrainOnly ? null : state.openGmap,
+            onTap: widget.readOnly ? null : _openAnyGmap,
           ),
           JoIconAction(
             icon: JoIcons.save,
@@ -855,33 +881,78 @@ class _EditorPageState extends State<EditorPage> {
             ),
           const Spacer(),
           if (!widget.readOnly)
+            // 状态切换时必须换 key：否则 Flutter 会复用旧的 JoTap/
+            // AnimatedContainer，旧的按钮动画会残留，看起来像“抽一下”。
             JoSegment<int>(
-              key: ValueKey<int>(_panelTab),
+              key: ValueKey<String>('${_panelTab}_${solidDrawing}_$portalDrawing'),
               options: switch (_panelTab) {
               0 || 1 || 2 => const [
                   (label: '选择', value: 0),
                   (label: '笔', value: 1),
                   (label: '橡皮', value: 2),
                 ],
-              3 => const [
-                  (label: '选择', value: 0),
-                  (label: '新建', value: 1),
-                  (label: '橡皮', value: 2),
-                ],
+              3 => portalDrawing
+                  ? const [
+                      (label: '取消', value: 11),
+                    ]
+                  : const [
+                      (label: '选择', value: 0),
+                      (label: '新建', value: 1),
+                      (label: '橡皮', value: 2),
+                    ],
               7 => const [
                   (label: '选择', value: 0),
                   (label: '放置', value: 1),
                   (label: '拆除', value: 2),
                 ],
+              5 => solidDrawing
+                  ? const [
+                      (label: '完成', value: 10),
+                      (label: '取消', value: 11),
+                    ]
+                  : const [
+                      (label: '选择', value: 0),
+                      (label: '新建', value: 1),
+                      (label: '橡皮', value: 2),
+                    ],
               _ => const [
                   (label: '选择', value: 0),
                 ],
             },
-            value: _currentTool,
+            value: solidDrawing ? 10 : (portalDrawing ? 11 : _currentTool),
             onChanged: (v) => setState(() {
+              if (_panelTab == 3 && v == 11) {
+                if (state.linePortalPick) state.toggleLinePortalPick();
+                _toolByTab[3] = 1;
+                return;
+              }
+              if (_panelTab == 5) {
+                if (v == 10) {
+                  state.finishSolid();
+                  _toolByTab[5] = 1;
+                  if (!state.solidPick) state.toggleSolidPick();
+                  return;
+                }
+                if (v == 11) {
+                  state.cancelSolid();
+                  _toolByTab[5] = 1;
+                  state.toggleSolidPick();
+                  return;
+                }
+              }
               _toolByTab[_panelTab] = v;
+              if (v != 0 && _selectionKind != null) {
+                state.setSelection(null);
+              }
               if (_panelTab == 3 && v == 0 && state.linePortalPick) {
                 state.toggleLinePortalPick();
+              }
+              if (_panelTab == 5) {
+                if (v == 1 && !state.solidPick) {
+                  state.toggleSolidPick();
+                } else if (v != 1 && state.solidPick) {
+                  state.cancelSolid();
+                }
               }
             }),
           ),
@@ -892,6 +963,23 @@ class _EditorPageState extends State<EditorPage> {
   }
 
   Widget _leftPanel(JoPalette p, double width) {
+    final layerList = JoListSection(
+      title: '层列表',
+      child: ListView(
+        children: [
+          for (final int z in state.levels.reversed)
+            JoListRow(
+              title: 'z = $z',
+              subtitle: widget.terrainOnly
+                  ? null
+                  : '${state.world!.segments.where((s) => s.spec.originZ == z).length} 个段',
+              selected: z == state.selectedLevel,
+              onTap: () => state.setLevel(z),
+            ),
+        ],
+      ),
+    );
+
     return SizedBox(
       width: width,
       child: ColoredBox(
@@ -942,96 +1030,85 @@ class _EditorPageState extends State<EditorPage> {
             ),
             Container(height: 1, color: p.border),
 
-            // —— 层
-            SizedBox(
-              height: appSettings.layerHeight.clamp(
-                60.0,
-                (MediaQuery.sizeOf(context).height - 320)
+            if (widget.terrainOnly)
+              Expanded(child: layerList)
+            else ...[
+              SizedBox(
+                height: appSettings.layerHeight.clamp(
+                  60.0,
+                  (MediaQuery.sizeOf(context).height - 320)
+                      .clamp(60.0, 600.0),
+                ),
+                child: layerList,
+              ),
+              JoSplitter(
+                palette: p,
+                axis: JoSplitterAxis.vertical,
+                colors: [p.surface, p.surface],
+                width: appSettings.layerHeight,
+                minWidth: 60,
+                maxWidth: (MediaQuery.sizeOf(context).height - 320)
                     .clamp(60.0, 600.0),
+                defaultWidth: 120,
+                growsRight: true,
+                onResize: appSettings.setLayerHeight,
+                onResizeEnd: appSettings.saveLayout,
               ),
-              child: JoListSection(
-                title: '层列表',
-                child: ListView(
-                  children: [
-                    for (final int z in state.levels.reversed)
-                      JoListRow(
-                        title: 'z = $z',
-                        subtitle:
-                            '${state.world!.segments.where((s) => s.spec.originZ == z).length} 个${(widget.readOnly || widget.terrainOnly) ? '图层' : '段'}',
-                        selected: z == state.selectedLevel,
-                        onTap: () => state.setLevel(z),
-                      ),
-                  ],
-                ),
-              ),
-            ),
-            JoSplitter(
-              palette: p,
-              axis: JoSplitterAxis.vertical,
-              colors: [p.surface, p.surface],
-              width: appSettings.layerHeight,
-              minWidth: 60,
-              maxWidth: (MediaQuery.sizeOf(context).height - 320)
-                  .clamp(60.0, 600.0),
-              defaultWidth: 120,
-              growsRight: true,
-              onResize: appSettings.setLayerHeight,
-              onResizeEnd: appSettings.saveLayout,
-            ),
-
-            // —— 段
-            Expanded(
-              child: JoListSection(
-                title: (widget.readOnly || widget.terrainOnly) ? '图层' : '段列表',
-                actions: (widget.readOnly || widget.terrainOnly)
-                    ? const <Widget>[]
-                    : [
-                        JoButton(
-                          text: '新建',
-                          bordered: true,
-                          onTap: state.world == null
-                              ? null
-                              : () => setState(() => _newSegOpen = true),
-                        ),
-                        const SizedBox(width: JoSpace.s1),
-                        JoButton(
-                          text: '复制',
-                          bordered: true,
-                          onTap: state.world == null ? null : state.duplicateSegment,
-                        ),
-                        const SizedBox(width: JoSpace.s1),
-                        JoButton(
-                          text: '删除',
-                          danger: true,
-                          onTap: state.world == null ||
-                                  state.world!.segments.length <= 1
-                              ? null
-                              : () => setState(() => _delSegOpen = true),
-                        ),
-                      ],
-                child: ListView.builder(
-                  itemCount: state.world == null
-                      ? 0
-                      : state.world!.segments
+              Expanded(
+                child: JoListSection(
+                  title: widget.readOnly ? '图层' : '段列表',
+                  actions: widget.readOnly
+                      ? const <Widget>[]
+                      : [
+                          JoButton(
+                            text: '新建',
+                            bordered: true,
+                            onTap: state.world == null
+                                ? null
+                                : () => setState(() => _newSegOpen = true),
+                          ),
+                          const SizedBox(width: JoSpace.s1),
+                          JoButton(
+                            text: '复制',
+                            bordered: true,
+                            onTap: state.world == null
+                                ? null
+                                : state.duplicateSegment,
+                          ),
+                          const SizedBox(width: JoSpace.s1),
+                          JoButton(
+                            text: '删除',
+                            danger: true,
+                            onTap: state.world == null ||
+                                    state.world!.segments.length <= 1
+                                ? null
+                                : () => setState(() => _delSegOpen = true),
+                          ),
+                        ],
+                  child: ListView.builder(
+                    itemCount: state.world == null
+                        ? 0
+                        : state.world!.segments
+                            .where((s) => s.spec.originZ == state.selectedLevel)
+                            .length,
+                    itemBuilder: (context, index) {
+                      final List<Segment> list = state.world!.segments
                           .where((s) => s.spec.originZ == state.selectedLevel)
-                          .length,
-                  itemBuilder: (context, index) {
-                    final List<Segment> list = state.world!.segments
-                        .where((s) => s.spec.originZ == state.selectedLevel)
-                        .toList(growable: false);
-                    final Segment segment = list[index];
-                    final int globalIndex =
-                        state.world!.segments.indexOf(segment);
-                    return JoListRow(
-                      title: segment.spec.id,
-                      subtitle: '${segment.width}×${segment.height}',
-                      selected: globalIndex == state.selectedSegment,
-                      onTap: () => state.selectSegment(globalIndex),
-                    );
-                  },
+                          .toList(growable: false);
+                      final Segment segment = list[index];
+                      final int globalIndex =
+                          state.world!.segments.indexOf(segment);
+                      return JoListRow(
+                        title: segment.spec.id,
+                        subtitle: '${segment.width}×${segment.height}',
+                        selected: globalIndex == state.selectedSegment,
+                        onTap: () => state.selectSegment(globalIndex),
+                      );
+                    },
+                  ),
                 ),
               ),
-            ),
+            ],
           ],
         ),
       ),
@@ -1065,13 +1142,17 @@ class _EditorPageState extends State<EditorPage> {
       portalEraseMode: !widget.readOnly && (!widget.terrainOnly || widget.allowPortals) && _panelTab == 3 && _currentTool == 2,
       onPortalEraseCell: state.eraseLinePortalWorld,
       fitEpoch: _fitEpoch,
-      selection: state.selection,
-      onSelectionChanged: state.setSelection,
-      onMoveSelection: (dc, dr) {
-        final current = state.selection;
-        if (current == null) return;
-        state.moveRegion(current, dc, dr);
-      },
+      selection: _selectionKind == null ? null : state.selection,
+      selectionEnabled: _selectionKind != null,
+      onSelectionChanged:
+          _selectionKind == null ? null : state.setSelection,
+      onMoveSelection: _selectionKind == null
+          ? null
+          : (dc, dr) {
+              final current = state.selection;
+              if (current == null) return;
+              state.moveRegion(current, dc, dr, kind: _selectionKind!);
+            },
       onViewChanged: (scale, fitScale, fit) {
         if ((scale - _zoomScale).abs() > 0.001 ||
             (fitScale - _fitScale).abs() > 0.001 ||
@@ -1087,6 +1168,9 @@ class _EditorPageState extends State<EditorPage> {
         if (!state.linePortalPick) state.toggleLinePortalPick();
         state.pickLinePortalWorld(c, r);
       },
+      onCancelLinePortal: () {
+        if (state.linePortalPick) state.toggleLinePortalPick();
+      },
       selectedLinePortal: state.selectedLinePortal,
       linePickStart: state.linePickStart,
       placedProps: state.placedProps,
@@ -1101,11 +1185,20 @@ class _EditorPageState extends State<EditorPage> {
       startPickMode: !widget.readOnly && !widget.terrainOnly && state.startPick,
       onStartCell: state.setStartWorld,
       solids: state.solids,
-      solidMode: !widget.readOnly && (widget.allowCollision || !widget.terrainOnly) && state.solidPick,
-      onSolidCell: state.pickSolidWorld,
+      solidMode: !widget.readOnly && (widget.allowCollision || !widget.terrainOnly) && _panelTab == 5 && state.solidPick,
+      onSolidCell: (int c, int r) {
+        state.pickSolidWorld(c, r);
+        if (_panelTab == 5 && !state.solidPick) {
+          setState(() => _toolByTab[5] = 1);
+          state.toggleSolidPick();
+        }
+      },
+      onRemoveLastSolidPoint: state.removeLastSolidPoint,
       solidDraft: state.solidDraft,
       solidSelectMode: !widget.readOnly && (widget.allowCollision || !widget.terrainOnly) && _panelTab == 5 && !state.solidPick,
-      onSolidSelectCell: state.selectSolidWorld,
+      onSolidSelectCell: _currentTool == 2
+          ? state.eraseSolidWorld
+          : state.selectSolidWorld,
       selectedSolid: state.selectedSolid,
       padMode: !widget.readOnly && (!widget.terrainOnly || widget.allowPortals) && _panelTab == 7 && _currentTool != 0,
       onPadCell: _currentTool == 2 ? state.removePadWorld : state.placePadWorld,
@@ -1143,12 +1236,20 @@ class _EditorPageState extends State<EditorPage> {
                       (label: '传送格', value: 7),
                     ],
                     if (widget.allowCollision) (label: '碰撞', value: 5),
+                    (label: '世界', value: 6),
                   ],
                 ],
                 value: _panelTab,
                 onChanged: (v) {
                   setState(() {
-                    if (state.linePortalPick) state.toggleLinePortalPick();
+                    if (v != 3 && state.linePortalPick) {
+                      state.toggleLinePortalPick();
+                    }
+                    if (v != 5 && state.solidPick) {
+                      state.cancelSolid();
+                      _toolByTab[5] = 0;
+                    }
+                    if (v != _panelTab) state.setSelection(null);
                     _panelTab = v;
                   });
                   if (v == 3 && state.selectedPlane < 0 && state.planes.isNotEmpty) {
@@ -1256,36 +1357,12 @@ class _EditorPageState extends State<EditorPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
-                children: [
-                  JoButton(
-                    text: state.solidPick ? '点顶点中…' : '新建碰撞',
-                    bordered: true,
-                    color: state.solidPick ? p.accent : null,
-                    onTap: state.toggleSolidPick,
-                  ),
-                  const SizedBox(width: JoSpace.s2),
-                  JoButton(
-                    text: '完成',
-                    bordered: true,
-                    onTap: state.solidPick && state.solidDraft.length >= 3
-                        ? state.finishSolid
-                        : null,
-                  ),
-                  const SizedBox(width: JoSpace.s2),
-                  JoButton(
-                    text: '取消',
-                    onTap: state.solidPick ? state.cancelSolid : null,
-                  ),
-                ],
+              Text(
+                state.solidPick && state.solidDraft.isNotEmpty
+                    ? '已点 ${state.solidDraft.length} 个点；点回第一个点，或用工具栏“完成”闭合。'
+                    : '点在画布上放下第一个顶点；点回第一个点或用“完成”闭合。',
+                style: JoTheme.meta(context).copyWith(color: p.secondary),
               ),
-              if (state.solidPick) ...[
-                const SizedBox(height: JoSpace.s1),
-                Text(
-                  '已点 ${state.solidDraft.length} 个点；点回第一个点或按“完成”闭合。凹多边形会自动拆成三角形。',
-                  style: JoTheme.meta(context).copyWith(color: p.secondary),
-                ),
-              ],
             ],
           ),
         ),
@@ -1345,18 +1422,18 @@ class _EditorPageState extends State<EditorPage> {
           ),
           const SizedBox(height: JoSpace.s2),
           JoButton(
-            text: state.startPick ? '在画布上点…' : '在画布上点',
+            text: state.startPick ? '点击画布选择…' : '设定起点',
             bordered: true,
             color: state.startPick ? p.accent : null,
             onTap: state.toggleStartPick,
           ),
           const SizedBox(height: JoSpace.s2),
           Text(
-            '点一下画布上的格子，换算成世界坐标写入 world.json。',
+            '点击画布上的格子，把它设为世界起点。',
             style: JoTheme.meta(context).copyWith(color: p.secondary),
           ),
           const SizedBox(height: JoSpace.s4),
-          _label(p, '段'),
+          _label(p, widget.terrainOnly ? '图层' : '段'),
           Text(
             '${w.segments.length} 个',
             style: JoTheme.meta(context).copyWith(color: p.text),
@@ -1955,6 +2032,29 @@ class _EditorPageState extends State<EditorPage> {
             const SizedBox(height: JoSpace.s2),
             Text(
               '开启后显示打开世界目录、导入到世界目录等入口。',
+              style: JoTheme.meta(context).copyWith(color: p.secondary),
+            ),
+            const SizedBox(height: JoSpace.s5),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '开启已弃用的历史功能',
+                    style: JoTheme.ui(context).copyWith(
+                      fontSize: 13,
+                      color: p.text,
+                    ),
+                  ),
+                ),
+                JoToggle(
+                  on: appSettings.legacyFeatures,
+                  onChanged: appSettings.setLegacyFeatures,
+                ),
+              ],
+            ),
+            const SizedBox(height: JoSpace.s2),
+            Text(
+              '开启后显示 v1 .gmap 打开/导入、v1 世界目录等历史入口。',
               style: JoTheme.meta(context).copyWith(color: p.secondary),
             ),
           ],

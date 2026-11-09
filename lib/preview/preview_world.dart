@@ -1,9 +1,10 @@
 /// V1 只读预览使用的世界加载器。
 ///
-/// 只读取世界，不写源目录。旧格式世界会先迁移到系统临时目录的副本。
+/// 只读取世界，不写源目录。v1 世界会先迁移到系统临时目录的副本。
 library;
 
 import 'dart:io';
+import 'dart:typed_data';
 
 import '../world/chunk_file.dart';
 import '../world/gmap_container.dart';
@@ -67,6 +68,8 @@ class PreviewWorld {
     this.sourcePath,
     this.temporaryDirectory,
     this.migrationReport,
+    this.gmapPath,
+    this.gmapExtraEntries = const <String, Uint8List>{},
   });
 
   final String worldPath;
@@ -80,6 +83,12 @@ class PreviewWorld {
   /// 迁移旧世界时创建的临时目录；预览关闭时由页面删除。
   final Directory? temporaryDirectory;
   final String? migrationReport;
+
+  /// 如果世界来自 `.gmap`，这里是源包路径；保存时写回这个包。
+  final String? gmapPath;
+
+  /// `.gmap` 里除世界文件以外的条目（如 definitions 快照），保存时原样带回。
+  final Map<String, Uint8List> gmapExtraEntries;
 
   List<int> get layers {
     final values = <int>{...chunksByLayer.keys, ...boundsByLayer.keys}.toList();
@@ -129,11 +138,17 @@ class PreviewWorld {
     }
     final container = GmapContainer.decode(file.readAsBytesSync());
     if (container.version != 2) {
-      throw const FormatException('V7 只打开 GMAP v2 包，旧 v1 请先用迁移功能');
+      throw const FormatException('只打开 GMAP v2 包；v1 请先用迁移功能');
     }
     final temp = Directory.systemTemp.createTempSync('gloomy_gmap_open_');
     try {
+      final extraEntries = <String, Uint8List>{};
       for (final entry in container.entries.entries) {
+        if (entry.key != 'world.meta.json' &&
+            entry.key != 'world.index.json' &&
+            !entry.key.startsWith('chunks/')) {
+          extraEntries[entry.key] = entry.value;
+        }
         final target = File(
           '${temp.path}${Platform.pathSeparator}'
           '${entry.key.replaceAll('/', Platform.pathSeparator)}',
@@ -150,6 +165,8 @@ class PreviewWorld {
         definitions: definitions,
         sourcePath: path,
         temporaryDirectory: temp,
+        gmapPath: path,
+        gmapExtraEntries: extraEntries,
       );
     } catch (_) {
       if (temp.existsSync()) temp.deleteSync(recursive: true);
@@ -208,7 +225,7 @@ class PreviewWorld {
         sourcePath: sourcePath,
         temporaryDirectory: temp,
         migrationReport:
-            '已从旧格式迁移：${result.report.segmentCount} 个段，'
+            '已从 v1 迁移：${result.report.segmentCount} 个段，'
             '${result.report.chunkCount} 个块；'
             '传送门 ${result.report.portalMapping.length} 个，'
             '传送格 ${result.report.padMapping.length} 个',
@@ -225,6 +242,8 @@ class PreviewWorld {
     required String sourcePath,
     Directory? temporaryDirectory,
     String? migrationReport,
+    String? gmapPath,
+    Map<String, Uint8List> gmapExtraEntries = const <String, Uint8List>{},
   }) {
     final store = WorldStore(worldPath);
     final meta = store.loadMeta();
@@ -295,6 +314,8 @@ class PreviewWorld {
       sourcePath: sourcePath,
       temporaryDirectory: temporaryDirectory,
       migrationReport: migrationReport,
+      gmapPath: gmapPath,
+      gmapExtraEntries: gmapExtraEntries,
     );
   }
 

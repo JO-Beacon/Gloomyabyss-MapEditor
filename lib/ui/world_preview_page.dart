@@ -10,9 +10,9 @@ import '../preview/preview_world.dart';
 import '../world/chunk_file.dart';
 import '../world/definitions.dart';
 
-/// V1：新格式世界的只读预览页。
+/// v2 世界的只读预览页。
 ///
-/// 不编辑、不保存；旧格式目录会先迁移到系统临时目录再显示。
+/// 不编辑、不保存；v1 世界目录会先迁移到系统临时目录再显示。
 class WorldPreviewPage extends StatefulWidget {
   const WorldPreviewPage({
     super.key,
@@ -77,7 +77,7 @@ class _WorldPreviewPageState extends State<WorldPreviewPage> {
 
   Future<void> _openWorld() async {
     final path = await FilePicker.getDirectoryPath(
-      dialogTitle: '选择世界目录（旧格式或新格式）',
+      dialogTitle: '选择世界目录（v1 或 v2）',
     );
     if (path == null || path.isEmpty) return;
     await _openPath(path);
@@ -163,7 +163,7 @@ class _WorldPreviewPageState extends State<WorldPreviewPage> {
       child: Row(
         children: <Widget>[
           Text(
-            '新格式世界预览',
+            'v2 世界预览',
             style: JoTheme.ui(context).copyWith(
               fontSize: 15,
               fontWeight: FontWeight.w700,
@@ -250,12 +250,12 @@ class _WorldPreviewPageState extends State<WorldPreviewPage> {
             ),
           if (world == null) ...<Widget>[
             Text(
-              '打开一个旧世界目录或新格式世界目录。',
+              '打开一个 v1 或 v2 世界目录。',
               style: JoTheme.ui(context).copyWith(color: p.text, fontSize: 14),
             ),
             const SizedBox(height: JoSpace.s2),
             Text(
-              '旧格式会先复制并迁移到系统临时目录，源目录不会被修改。',
+              'v1 世界会先复制并迁移到系统临时目录，源目录不会被修改。',
               style: JoTheme.meta(context).copyWith(color: p.secondary),
             ),
             const SizedBox(height: JoSpace.s4),
@@ -285,7 +285,7 @@ class _WorldPreviewPageState extends State<WorldPreviewPage> {
             _infoRow(
               p,
               '预览数据',
-              world.temporaryDirectory == null ? '新格式目录' : '旧格式临时副本',
+              world.temporaryDirectory == null ? 'v2 世界目录' : 'v1 临时副本',
             ),
             const SizedBox(height: JoSpace.s4),
             _sectionTitle(p, '层'),

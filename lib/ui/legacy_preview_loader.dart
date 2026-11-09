@@ -8,7 +8,7 @@ import '../preview/preview_world.dart';
 import '../state/editor_state.dart';
 import 'editor_page.dart';
 
-/// 直接以旧 UI 只读打开一个新格式/旧格式世界。
+/// 直接以旧 UI 只读打开一个 v2/v1 世界。
 ///
 /// 只用于命令行 `--legacy-preview=...` 和测试；正常入口在编辑器菜单里。
 class LegacyPreviewLoader extends StatefulWidget {
@@ -48,7 +48,7 @@ class _LegacyPreviewLoaderState extends State<LegacyPreviewLoader> {
       if (widget.editable && preview.temporaryDirectory != null) {
         preview.dispose();
         throw const FormatException(
-          'V2 地形编辑只支持新格式目录（含 world.meta.json）。',
+          'v2 编辑只支持 v2 世界目录（含 world.meta.json）。',
         );
       }
       final data = LegacyWorldAdapter.fromPreview(preview);
@@ -61,10 +61,10 @@ class _LegacyPreviewLoaderState extends State<LegacyPreviewLoader> {
         ..selectedCode = data.terrain.types.first.code
         ..newFormatEditing = true
         ..notice = widget.editable
-            ? 'V7 编辑：地形/道具/对象/传送门/传送格/碰撞'
+            ? null
             : (preview.temporaryDirectory == null
-                ? '只读预览：新格式世界'
-                : '只读预览：已从旧格式迁移到临时副本');
+                ? '只读预览：v2 世界'
+                : '只读预览：已从 v1 迁移到临时副本');
       final levelSegments = data.world.segments
           .where((s) => s.spec.originZ == data.selectedLevel)
           .toList(growable: false);
